@@ -62,9 +62,9 @@ class ABCCNN(ABC):
             in_channel = channel_sizes[idx]
 
             # tensorboard
-            tf.summary.histogram("Filter_"+W_key, _weights[W_key])
-            if no_bias == False:
-                tf.summary.histogram("Bias_"+b_key, _biases[b_key])
+            #tf.summary.histogram("Filter_"+W_key, _weights[W_key])
+            #if no_bias == False:
+            #tf.summary.histogram("Bias_"+b_key, _biases[b_key])
 
         return _weights, _biases, num_layer
 
@@ -86,10 +86,11 @@ class ABCCNN(ABC):
             in_size = out_size
 
             # tensorboard
+            '''
             tf.summary.histogram("Weight_"+W_key, _weights[W_key])
             if no_bias == False:
                 tf.summary.histogram("Bias_"+b_key, _biases[b_key])
-            
+            '''
             return in_size
         
         for idx in range(num_layer):

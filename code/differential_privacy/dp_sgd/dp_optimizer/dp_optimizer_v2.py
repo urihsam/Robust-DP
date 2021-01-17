@@ -17,8 +17,14 @@
 """
 from __future__ import division
 
+import numpy as np
 import tensorflow as tf
-
+from dependency import *
+#from gradients import gradients_impl, jacobian
+from utils.vectorized_map import vectorized_map
+from utils.map_fn import map_fn
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops.parallel_for import control_flow_ops
 from differential_privacy.dp_sgd.dp_optimizer import utils
 from differential_privacy.dp_sgd.per_example_gradients import per_example_gradients
 
@@ -28,8 +34,9 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
   """
 
   def __init__(self, learning_rate, eps_delta, sanitizer,
-               sigma=None, use_locking=False, name="DPGradientDescent",
-               batches_per_lot=1):
+               sigma=None, accountant_sigma=None, use_locking=False, name="DPGradientDescent",
+               batches_per_lot=1, 
+               is_sigma_layerwised=False, is_sigma_data_dependent=False):
     """Construct a differentially private gradient descent optimizer.
 
     The optimizer uses fixed privacy budget for each batch of training.
@@ -50,6 +57,9 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
 
     # Also, if needed, define the gradient accumulators
     self._batches_per_lot = batches_per_lot
+
+    self._is_sigma_layerwised = is_sigma_layerwised
+    self._is_sigma_data_dependent = is_sigma_data_dependent
     self._grad_accum_dict = {}
     if batches_per_lot > 1:
       self._batch_count = tf.Variable(1, dtype=tf.int32, trainable=False,
@@ -65,6 +75,7 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
     self._eps_delta = eps_delta
     self._sanitizer = sanitizer
     self._sigma = sigma
+    self._act_sigma = accountant_sigma
 
   def compute_sanitized_gradients(self, loss, var_list=None,
                                   add_noise=True):
@@ -86,19 +97,62 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
     xs = [tf.convert_to_tensor(x) for x in var_list]
     px_grads = per_example_gradients.PerExampleGradients(loss, xs)
     sanitized_grads = []
+    
+    idx = 0
     for px_grad, v in zip(px_grads, var_list):
       tensor_name = utils.GetTensorOpName(v)
-      sanitized_grad = self._sanitizer.sanitize(
-          px_grad, self._eps_delta, sigma=self._sigma,
-          tensor_name=tensor_name, add_noise=add_noise,
+      if self._is_sigma_layerwised:
+        sig = self._sigma[idx]
+        if self._act_sigma != None:
+          act_sig = self._act_sigma[idx]
+      else:
+        sig = self._sigma
+        if self._act_sigma != None:
+          act_sig = self._act_sigma
+      
+      def no_noise():
+        act_op = self._sanitizer.sanitize(
+          px_grad, self._eps_delta, sigma=act_sig,
+          tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise,
           num_examples=self._batches_per_lot * tf.slice(
               tf.shape(px_grad), [0], [1]))
+        with tf.control_dependencies([act_op]):
+          sanitized_grad = self._sanitizer.sanitize(
+            px_grad, self._eps_delta, sigma=sig,
+            tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=False,
+            num_examples=self._batches_per_lot * tf.slice(
+                tf.shape(px_grad), [0], [1]))
+        
+        return sanitized_grad
+      
+      def noise():
+        act_op = self._sanitizer.sanitize(
+          px_grad, self._eps_delta, sigma=act_sig,
+          tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise,
+          num_examples=self._batches_per_lot * tf.slice(
+              tf.shape(px_grad), [0], [1]))
+        with tf.control_dependencies([act_op]):
+          sanitized_grad = self._sanitizer.sanitize(
+            px_grad, self._eps_delta, sigma=sig,
+            tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise, no_account=True,
+            num_examples=self._batches_per_lot * tf.slice(
+                tf.shape(px_grad), [0], [1]))
+        return sanitized_grad
+      if self._act_sigma != None:
+        sanitized_grad = tf.cond(tf.equal(sig, tf.constant(0.0)), no_noise, noise)
+      else:
+        sanitized_grad = self._sanitizer.sanitize(
+            px_grad, self._eps_delta, sigma=sig,
+            tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise,
+            num_examples=self._batches_per_lot * tf.slice(
+                tf.shape(px_grad), [0], [1]))
       sanitized_grads.append(sanitized_grad)
-
+      idx += 1
     return sanitized_grads
+    
 
   def minimize(self, loss, global_step=None, var_list=None,
-               name=None):
+                name=None):
     """Minimize using sanitized gradients.
 
     This gets a var_list which is the list of trainable variables.
@@ -131,9 +185,11 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
       if not isinstance(var, tf.Variable):
         raise TypeError("Argument is not a variable.Variable: %s" % var)
 
+    #import pdb; pdb.set_trace()
+    # compute the sigma used for gradient perturbation
+
     # Modification: apply gradient once every batches_per_lot many steps.
     # This may lead to smaller error
-
     if self._batches_per_lot == 1:
       sanitized_grads = self.compute_sanitized_gradients(
           loss, var_list=var_list)
@@ -143,7 +199,7 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
       #import pdb; pdb.set_trace()
       grads = []
       for grad, var in grads_and_vars:
-        if "b_conv_" in var.name:
+        if "b_conv_" in var.name or ("b_g" in var.name and "_res"  in var.name):
           grad = tf.reduce_mean(grad, axis=[0,1])
         grads.append(grad)
       grads_and_vars = list(zip(grads, var_list))
@@ -180,6 +236,15 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
       """
       sanitized_grads = self.compute_sanitized_gradients(
           loss, var_list=var_list, add_noise=False)
+      
+      grads_and_vars = list(zip(sanitized_grads, var_list))
+      # conv bias
+      grads = []
+      for grad, var in grads_and_vars:
+        if "b_conv_" in var.name or ("b_g" in var.name and "_res"  in var.name):
+          grad = tf.reduce_mean(grad, axis=[0,1])
+        grads.append(grad)
+      sanitized_grads = grads
 
       update_ops_list = []
       for var, grad in zip(var_list, sanitized_grads):
@@ -211,6 +276,15 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
       # that looks almost identical to the non_last_op case here.
       sanitized_grads = self.compute_sanitized_gradients(
           loss, var_list=var_list, add_noise=True)
+      
+      grads_and_vars = list(zip(sanitized_grads, var_list))
+      # conv bias
+      grads = []
+      for grad, var in grads_and_vars:
+        if "b_conv_" in var.name or ("b_g" in var.name and "_res"  in var.name):
+          grad = tf.reduce_mean(grad, axis=[0,1])
+        grads.append(grad)
+      sanitized_grads = grads
 
       normalized_grads = []
       for var, grad in zip(var_list, sanitized_grads):
@@ -223,15 +297,17 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
         normalized_grads.append(normalized_grad)
 
       with tf.control_dependencies(normalized_grads):
-        grads_and_vars = zip(normalized_grads, var_list)
+        grads_and_vars = list(zip(normalized_grads, var_list))
         self._assert_valid_dtypes(
             [v for g, v in grads_and_vars if g is not None])
+        '''
         grads = []
         for grad, var in grads_and_vars:
           if "b_conv_" in var.name:
             grad = tf.reduce_mean(grad, axis=[0,1])
           grads.append(grad)
         grads_and_vars = list(zip(grads, var_list))
+        '''
         apply_san_grads = self.apply_gradients(grads_and_vars,
                                                global_step=global_step,
                                                name="apply_grads")
@@ -254,3 +330,4 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
                         lambda: non_last_in_lot_op(
                             loss, var_list))
     return tf.group(update_op)
+

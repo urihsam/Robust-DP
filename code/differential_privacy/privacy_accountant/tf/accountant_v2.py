@@ -370,8 +370,12 @@ class GaussianMomentsAccountant(MomentsAccountant):
       for j in range(t + 1):
         signs[i, j] = 1.0 - 2 * ((i - j) % 2)
     #import pdb; pdb.set_trace()
+    '''
     exponents = tf.constant([j * (j + 1.0 - 2.0 * s) / (2.0 * sigma * sigma)
                              for j in range(t + 1)], dtype=tf.float64)
+    '''
+    exponents = tf.constant([j * (j + 1.0 - 2.0 * s) for j in range(t + 1)], dtype=tf.float64) / (2.0 * sigma * sigma)
+    
     # x[i, j] = binomial[i, j] * signs[i, j] = (i choose j) * (-1)^{i-j}
     x = tf.multiply(binomial, signs)
     # y[i, j] = x[i, j] * exp(exponents[j])

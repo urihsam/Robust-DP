@@ -12,6 +12,7 @@ class MNISTCNN(RESENC):
                  conv_channel_sizes=[32, 64, 128], # [128, 128, 128, 128, 1]
                  conv_leaky_ratio=[0.4, 0.4, 0.4],
                  conv_drop_rate=[0.4, 0.4, 0.4],
+                 conv_residual=False,
                  # residual layers
                  num_res_block=4,
                  res_block_size=2,
@@ -28,7 +29,8 @@ class MNISTCNN(RESENC):
                  img_channel=None,
                  # switch
                  out_norm = None,
-                 use_norm = None
+                 use_norm = None,
+                 include_top=True
                 ):
         # conv layers
         if isinstance(conv_filter_sizes[0], list):
@@ -46,7 +48,7 @@ class MNISTCNN(RESENC):
         self.conv_channel_sizes = conv_channel_sizes
         self.conv_leaky_ratio = conv_leaky_ratio
         self.conv_drop_rate = conv_drop_rate
-        
+        self.conv_residual = conv_residual
         # res layers
         self.num_res_block = num_res_block
         if self.num_res_block != 0:
@@ -71,13 +73,15 @@ class MNISTCNN(RESENC):
                 self.res_drop_rate = res_drop_rate
             else:
                 self.res_drop_rate = [res_drop_rate] * self.res_block_size
-        # out fc layer
-        self.out_state = out_state
-        if isinstance(out_fc_states, list):
-            self.out_fc_states = out_fc_states
-        else:
-            self.out_fc_states = [out_fc_states]
-        self.out_leaky_ratio = out_leaky_ratio
+        self.include_top = include_top
+        if self.include_top:
+            # out fc layer
+            self.out_state = out_state
+            if isinstance(out_fc_states, list):
+                self.out_fc_states = out_fc_states
+            else:
+                self.out_fc_states = [out_fc_states]
+            self.out_leaky_ratio = out_leaky_ratio
         # img channel
         if img_channel == None:
             self.img_channel = FLAGS.NUM_CHANNELS
@@ -92,10 +96,10 @@ class MNISTCNN(RESENC):
         self.conv_filters, self.conv_biases, self.num_conv = self.conv_weights_biases()
         if self.num_res_block != 0:
             self.res_filters, self.res_biases = self.res_weights_biases()
-        self.out_weight, self.out_bias = self.out_weight_bias()
+        if self.include_top:
+            self.out_weight, self.out_bias = self.out_weight_bias()
     
 
-    @lazy_method
     def out_layer(self, inputs, W_name="W_out_", b_name="b_out_"):
         net = inputs
         h, w, c = net.get_shape().as_list()[1:]
@@ -123,25 +127,29 @@ class MNISTCNN(RESENC):
         return net
 
 
-    @lazy_method
     def evaluate(self, data, is_training, use_summary=True):
         self.is_training = is_training
-        conv_res = self.conv_res_groups(data)
+        conv_res = self.conv_res_groups(data, conv_residual=self.conv_residual)
         #assert res.get_shape().as_list()[1:] == self.res_out_shape
-        logits = self.out_layer(conv_res)
-        preds = tf.nn.softmax(logits)
-        # self.saver = tf.train.Saver()
-        if use_summary:
-            # tensorboard
-            tf.summary.histogram("Logits", logits)
-            tf.summary.histogram("Predictions", preds)
-        return logits, preds
+        if self.include_top:
+            logits = self.out_layer(conv_res)
+            preds = tf.nn.softmax(logits)
+            # self.saver = tf.train.Saver()
+            '''
+            if use_summary:
+                # tensorboard
+                tf.summary.histogram("Logits", logits)
+                tf.summary.histogram("Predictions", preds)
+            '''
+            return logits, preds
+        else:
+            return conv_res
 
-    @lazy_method
+
     def prediction(self, data, use_summary=True):
         return self.evaluate(data, False, use_summary)
 
-    @lazy_method
+
     def loss(self, logits, groundtruth, loss_type="xentropy"):
         if loss_type == "xentropy":
             loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
@@ -152,16 +160,16 @@ class MNISTCNN(RESENC):
                 tf.reduce_sum((tf.nn.softmax(logits) - groundtruth) ** 2, 1),
                 0)
         # tensorboard
-        tf.summary.scalar("Loss", loss)
+        #tf.summary.scalar("Loss", loss)
         return loss
 
 
-    @lazy_method
+
     def optimization(self, learning_rate, loss):
         optimizer = tf.train.AdamOptimizer(learning_rate).minimize(loss)
         return optimizer
 
-    @lazy_method
+
     def accuracy(self, prediction, groundtruth):
         correct_prediction = tf.equal(
             tf.argmax(groundtruth, 1),
@@ -169,7 +177,7 @@ class MNISTCNN(RESENC):
         )
         acc = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
         # tensorboard
-        tf.summary.scalar("Accuracy", acc)
+        #tf.summary.scalar("Accuracy", acc)
         return acc
 
 

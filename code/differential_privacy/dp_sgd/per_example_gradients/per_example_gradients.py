@@ -334,7 +334,7 @@ def PerExampleGradients(ys, xs, grad_ys=None, name="gradients",
     assert isinstance(x, tf.Tensor), type(x)
   interface = Interface(ys, xs)
   merged_interface = []
-  for x in xs:
+  for x in xs: # x is the params
     merged_interface = _ListUnion(merged_interface, interface[x])
   # Differentiate with respect to the interface
   interface_gradients = tf.gradients(ys, merged_interface, grad_ys=grad_ys,

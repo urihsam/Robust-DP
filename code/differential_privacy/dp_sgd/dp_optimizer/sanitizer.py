@@ -25,7 +25,7 @@ from __future__ import division
 import collections
 
 import tensorflow as tf
-
+from dependency import *
 from differential_privacy.dp_sgd.dp_optimizer import utils
 
 
@@ -63,9 +63,9 @@ class AmortizedGaussianSanitizer(object):
 
     self._options[tensor_name] = option
 
-  def sanitize(self, x, eps_delta, sigma=None,
-               option=ClipOption(None, None), tensor_name=None,
-               num_examples=None, add_noise=True):
+  def sanitize(self, x, eps_delta, sigma=None, no_account=False,
+               option=ClipOption(None, None), is_sigma_scalar=True, tensor_name=None,
+               num_examples=None, add_noise=True, no_clipping=False):
     """Sanitize the given tensor.
 
     This santize a given tensor by first applying l2 norm clipping and then
@@ -101,23 +101,61 @@ class AmortizedGaussianSanitizer(object):
         #   http://www.cis.upenn.edu/~aaroth/Papers/privacybook.pdf
         sigma = tf.sqrt(2.0 * tf.log(1.25 / delta)) / eps
 
-    l2norm_bound, clip = option
-    if l2norm_bound is None:
-      l2norm_bound, clip = self._default_option
-      if ((tensor_name is not None) and
-          (tensor_name in self._options)):
-        l2norm_bound, clip = self._options[tensor_name]
-    if clip:
-      x = utils.BatchClipByL2norm(x, l2norm_bound)
+    if no_clipping == False:
+      l2norm_bound, clip = option
+      if l2norm_bound is None:
+        l2norm_bound, clip = self._default_option
+        if ((tensor_name is not None) and
+            (tensor_name in self._options)):
+          l2norm_bound, clip = self._options[tensor_name]
+      if clip:
+        x = utils.BatchClipByL2norm(x, l2norm_bound)
+
+    else:
+      #l2norm_bound = 1.0
+      l2norm_bound, _ = option
 
     if add_noise:
       if num_examples is None:
         num_examples = tf.slice(tf.shape(x), [0], [1])
-      privacy_accum_op = self._accountant.accumulate_privacy_spending(
-          eps_delta, sigma, num_examples)
-      with tf.control_dependencies([privacy_accum_op]):
-        saned_x = utils.AddGaussianNoise(tf.reduce_sum(x, 0),
-                                         sigma * l2norm_bound)
+      num_one = tf.ones(shape=tf.shape(num_examples), dtype=tf.int32)
+      
+      def dp_acc_fn(sig):
+        sig64 = tf.cast(sig, dtype=tf.float64)
+        def non_zero():
+          if no_account:
+            return tf.random_normal(tf.shape(x)[1:], stddev=sig*l2norm_bound)
+          
+          privacy_accum_op = self._accountant.accumulate_privacy_spending(
+              eps_delta, sig64, num_one)
+          with tf.control_dependencies([privacy_accum_op]):
+            noise = tf.random_normal(tf.shape(x)[1:], stddev=sig*l2norm_bound)
+          return noise
+        
+        def zero():
+          return tf.zeros(tf.shape(x)[1:])
+        return tf.cond(tf.equal(sig, tf.constant(0.0)), zero, non_zero)
+
+      def non_scalar():
+        noises = tf.map_fn(dp_acc_fn, sigma)
+        saned_x = tf.reduce_mean(x+noises, 0) # reduce_sum?
+        return saned_x
+
+      def scalar():
+        if no_account:
+          saned_x = utils.AddGaussianNoise(x, sigma * l2norm_bound)
+          saned_x = tf.reduce_mean(saned_x, 0) # reduce_sum?
+          return saned_x
+
+        sigma64 = tf.cast(sigma, dtype=tf.float64)
+        privacy_accum_op = self._accountant.accumulate_privacy_spending(
+            eps_delta, sigma64, num_examples)
+        with tf.control_dependencies([privacy_accum_op]):
+          saned_x = utils.AddGaussianNoise(x, sigma * l2norm_bound)
+          saned_x = tf.reduce_mean(saned_x, 0) # reduce_sum?
+        return saned_x
+      saned_x = scalar() if is_sigma_scalar else non_scalar()
+
     else:
-      saned_x = tf.reduce_sum(x, 0)
+      saned_x = tf.reduce_mean(x, 0) # reduce_sum?
     return saned_x

@@ -10,32 +10,50 @@ class RDPCNN:
     Robust Differential Privacte CNN
     """
 
-    def __init__(self, data, label, robust_sigma, is_training):
-        self.data = data
+    def __init__(self, label, input_sigma, is_training, data=None, noised_data=None, px_noised_data=None, noise=None):
         self.label = label
-        self.robust_sigma = robust_sigma
+        self.input_sigma = input_sigma
         self.is_training = is_training
-
-        # noise layer
-        with tf.variable_scope("NOISE"):
-            self.noised_data = self.noise_layer(self.data, self.robust_sigma)
+        #
+        tf.debugging.set_log_device_placement(True)
+        gpus = tf.config.experimental.list_logical_devices('GPU')
+        #with tf.device(gpus[0].name): 
+        if px_noised_data != None and noise != None:
+            self.px_noised_data = px_noised_data
+            self.noised_data = tf.concat(self.px_noised_data, axis=0)
+            self.data = self.noised_data - noise
+        elif noised_data != None and noise != None:
+            self.noised_data = noised_data
+            self.data = self.noised_data - noise
+        else:
+            self.data = data
+            # noise layer
+            self.noised_data = self.noise_layer(self.data, self.input_sigma)
 
         # cnn model
         with tf.variable_scope('CNN') as scope:
             self.cnn = mnist_cnn.MNISTCNN(conv_filter_sizes=[[4,4], [4,4], [4,4]],
-                         conv_strides = [[2,2], [2,2], [2,2]], 
-                         conv_channel_sizes=[16, 32, 64], 
-                         conv_leaky_ratio=[0.2, 0.2, 0.2],
-                         conv_drop_rate=[0.0, 0.2, 0.0],
-                         num_res_block=0,
-                         out_state=4*4*64,
-                         out_fc_states=[10],
-                         out_leaky_ratio=0.2,
-                         out_norm="NONE",
-                         use_norm="NONE",
-                         img_channel=1)
+                        conv_strides = [[2,2], [2,2], [2,2]], 
+                        conv_channel_sizes=[8, 16, 32], 
+                        conv_leaky_ratio=[0.2, 0.2, 0.2],
+                        conv_drop_rate=[0.0, 0.2, 0.0],
+                        conv_residual=True,
+                        num_res_block=1,
+                        res_block_size=1,
+                        out_state=4*4*32,
+                        out_fc_states=[10],
+                        out_leaky_ratio=0.2,
+                        out_norm="NONE",
+                        use_norm="NONE",
+                        img_channel=1)
             self.cnn_logits, self.cnn_prediction = self.cnn.prediction(self.noised_data)
             self.cnn_accuracy = self.cnn.accuracy(self.cnn_prediction, self.label)
+
+        # recon
+        with tf.variable_scope(scope, reuse=True):
+            self.cnn_clean = self.cnn
+            self.cnn_clean_logits, self.cnn_clean_prediction = self.cnn_clean.prediction(self.data)
+            self.cnn_clean_accuracy = self.cnn_clean.accuracy(self.cnn_clean_prediction, self.label)
 
 
     def noise_layer(self, data, sigma):
@@ -56,13 +74,85 @@ class RDPCNN:
 
     @lazy_method
     def loss(self):
-        loss = self.cnn.loss(self.cnn_logits, self.label, loss_type="xentropy")
+        loss = FLAGS.BETA * self.cnn.loss(self.cnn_logits, self.label, loss_type="xentropy")
         tf.summary.scalar("Total_loss", loss)
         return loss
 
 
+    @lazy_method
+    def loss_clean(self):
+        loss = FLAGS.BETA * self.cnn_clean.loss(self.cnn_clean_logits, self.label, loss_type="xentropy")
+        tf.summary.scalar("Total_loss_clean", loss)
+        return loss
+
+
     @lazy_method_no_scope
-    def dp_optimization(self, loss, sanitizer, dp_sigma, scope="DP_OPT"):
+    def dp_accountant(self, loss, sanitizer, dp_sigma, learning_rate, scope="DP_ACCT"):
+        with tf.variable_scope(scope):
+            opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "CNN")
+            
+            # dp opt
+            optimizer = dp_optimizer.DPGradientDescentOptimizer(
+                learning_rate,
+                [None, None],
+                sanitizer,
+                sigma=dp_sigma,
+                batches_per_lot=FLAGS.BATCHES_PER_LOT)
+            
+            op, sigma_used, unmasked, res = optimizer.compute_sanitized_gradients_from_input_perturbation(loss, self.noised_data, 
+                                                                                input_sigma=self.input_sigma, 
+                                                                                var_list=opt_vars)
+
+            return op, sigma_used, unmasked, res
+
+    
+    def vars_size(self):
+        return len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "CNN"))
+
+
+    @lazy_method_no_scope
+    def dp_optimization(self, loss, sanitizer, dp_sigma, batched_per_lot=1, scope="DP_OPT"):
+        '''
+        def no_dp():
+            op, _, _, learning_rate = self.optimization(loss)
+            return op, learning_rate
+        
+        def dp():
+            with tf.variable_scope(scope):
+                """
+                decayed_learning_rate = learning_rate *
+                                decay_rate ^ (global_step / decay_steps)
+                learning rate decay with decay_rate per decay_steps
+                """
+                # use lobal step to keep track of our iterations
+                global_step = tf.Variable(0, name="OPT_GLOBAL_STEP", trainable=False)
+
+                # reset global step
+                reset_decay_op = global_step.assign(tf.constant(0))
+                # decay
+                learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step, 
+                    FLAGS.LEARNING_DECAY_STEPS, FLAGS.LEARNING_DECAY_RATE)
+
+                opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "CNN")
+                
+                # dp opt
+                optimizer = dp_optimizer.DPGradientDescentOptimizer(
+                    learning_rate,
+                    [None, None],
+                    sanitizer,
+                    sigma=dp_sigma,
+                    batches_per_lot=batched_per_lot)
+                
+                # this is the dp minimization
+                #import pdb; pdb.set_trace()
+                #grads_and_vars = optimizer.compute_gradients(loss, var_list=opt_vars)
+                #op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
+                # global_step is incremented by one after the variables have been updated.
+                op = optimizer.minimize(loss, global_step=global_step, var_list=opt_vars)
+                tf.summary.scalar("Learning_rate", learning_rate)
+                return op, learning_rate
+        return tf.cond(tf.equal(tf.reduce_sum(dp_sigma), tf.constant(0.0)), true_fn=no_dp, false_fn=dp)
+        '''
         with tf.variable_scope(scope):
             """
             decayed_learning_rate = learning_rate *
@@ -86,15 +176,14 @@ class RDPCNN:
                 [None, None],
                 sanitizer,
                 sigma=dp_sigma,
-                batches_per_lot=FLAGS.BATCHES_PER_LOT)
+                batches_per_lot=batched_per_lot)
             
-            #grads_and_vars = optimizer.compute_gradients(loss, var_list=opt_vars)
-            # global_step is incremented by one after the variables have been updated.
-            #op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
             # this is the dp minimization
             #import pdb; pdb.set_trace()
+            #grads_and_vars = optimizer.compute_gradients(loss, var_list=opt_vars)
+            #op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
+            # global_step is incremented by one after the variables have been updated.
             op = optimizer.minimize(loss, global_step=global_step, var_list=opt_vars)
-
             tf.summary.scalar("Learning_rate", learning_rate)
             return op, learning_rate
     

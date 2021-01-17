@@ -98,12 +98,10 @@ class RESENC(ABCCNN):
         self.out_weight, self.out_bias = self.out_weight_bias()
 
 
-    @lazy_method
     def conv_weights_biases(self):
         return self._conv_weights_biases("W_conv_", "b_conv_", self.conv_filter_sizes, self.img_channel, self.conv_channel_sizes)
 
 
-    @lazy_method
     def res_weights_biases(self):
         Ws = {}; bs = {}
         for g_idx in range(len(self.conv_channel_sizes)):
@@ -118,7 +116,6 @@ class RESENC(ABCCNN):
         return Ws, bs
 
 
-    @lazy_method
     def out_weight_bias(self):
         in_size = self.out_state
         if self.use_class_label:
@@ -127,8 +124,8 @@ class RESENC(ABCCNN):
         W, b, _ = self._fc_weights_biases("W_out_", "b_out_", in_size, state_size, init_type="XV_1")
         return W, b
 
-    @lazy_method
-    def conv_res_groups(self, inputs, W_name="W_conv_", b_name="b_conv_"):
+
+    def conv_res_groups(self, inputs, conv_residual=False, W_name="W_conv_", b_name="b_conv_"):
         #net = tf.reshape(inputs, [-1, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, self.img_channel])
         def _form_groups(net, start_layer, end_layer):
             for layer_id in range(start_layer, end_layer):
@@ -140,6 +137,7 @@ class RESENC(ABCCNN):
                 net = ne.conv2d(net, filters=curr_filter, biases=curr_bias,
                                 strides=self.conv_strides[layer_id],
                                 padding=self.conv_padding[layer_id])
+                conv_net = net
                 # batch normalization
                 if self.use_norm == "BATCH":
                     net = ne.batch_norm(net, self.is_training)
@@ -150,7 +148,9 @@ class RESENC(ABCCNN):
                 #net = ne.leaky_brelu(net, self.conv_leaky_ratio[layer_id], self.layer_low_bound, self.output_up_bound) # Nonlinear act
                 net = ne.leaky_relu(net, self.conv_leaky_ratio[layer_id])
                 net = ne.drop_out(net, self.conv_drop_rate[layer_id], self.is_training)
-
+                # residual for conv
+                if conv_residual:
+                    net += conv_net
                 # res blocks
                 if self.num_res_block != 0:
                     W_res_name = "W_g{}_res".format(layer_id)
@@ -165,7 +165,6 @@ class RESENC(ABCCNN):
         return net
 
 
-    @lazy_method_no_scope
     def res_blocks(self, inputs, W_name, b_name, scope):
         with tf.variable_scope(scope):
             net = inputs
@@ -201,7 +200,6 @@ class RESENC(ABCCNN):
             return net
     
 
-    @lazy_method
     def out_layer(self, inputs, label=None, W_name="W_out_", b_name="b_out_"):
         net = inputs
         h, w, c = net.get_shape().as_list()[1:]
@@ -233,7 +231,6 @@ class RESENC(ABCCNN):
         return net
 
 
-    @lazy_method
     def evaluate(self, data, is_training, label=None):
         self.is_training = is_training
         conv_res = self.conv_res_groups(data)
