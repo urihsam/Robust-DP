@@ -16,9 +16,10 @@ def set_flags():
     flags.DEFINE_string("TEST_LOG_PATH", "./graphs/test", "Path of log for testing")
     flags.DEFINE_string("TRAIN_LOG_FILENAME", "mnist_train_log.txt", "Path of log for training")
     flags.DEFINE_string("VALID_LOG_FILENAME", "mnist_valid_log.txt", "Path of log for validation")
-    flags.DEFINE_string("FINETUNE_TRAIN_LOG_FILENAME", "mnist_train_log.txt", "Path of log for training")
-    flags.DEFINE_string("FINETUNE_VALID_LOG_FILENAME", "mnist_valid_log.txt", "Path of log for validation")
-    flags.DEFINE_string("TEST_LOG_FILENAME", "test_log_.txt", "Path of log for testing")
+    flags.DEFINE_string("TEST_LOG_FILENAME", "mnist_test_log.txt", "Path of log for testing")
+    flags.DEFINE_string("FINETUNE_TRAIN_LOG_FILENAME", "mnist_fine_train_log.txt", "Path of log for training")
+    flags.DEFINE_string("FINETUNE_VALID_LOG_FILENAME", "mnist_fine_valid_log.txt", "Path of log for validation")
+    flags.DEFINE_string("FINETUNE_TEST_LOG_FILENAME", "mnist_fine_test_log.txt", "Path of log for testing")
     flags.DEFINE_string("ROBUST_LOG_FILENAME", "robust_log_.txt", "Path of log for robust")
     flags.DEFINE_string("DATA_DIR", "/Users/mashiru/Life/My-Emory/Research/Research-Project/Data/mnist", "Data dir")
     flags.DEFINE_string("ADV_PATH_PREFIX", "", "Prefix path for adv examples")
@@ -34,9 +35,9 @@ def set_flags():
     flags.DEFINE_integer("NUM_FINETUNE_EPOCHS", 1, "Number of epochs") # 200
     flags.DEFINE_integer("NUM_ACCUM_ITERS", 2, "Number of accumulation") # 2
     flags.DEFINE_integer("BATCH_SIZE", 128, "Size of training batches")# 128
-    flags.DEFINE_integer("BATCHES_PER_LOT", 20, "Number of batches per lot")
+    flags.DEFINE_integer("BATCHES_PER_LOT", 1, "Number of batches per lot")
     flags.DEFINE_integer("FINETUNE_BATCH_SIZE", 128, "Size of training batches")# 128
-    flags.DEFINE_integer("FINETUNE_BATCHES_PER_LOT", 20, "Number of batches per lot")
+    flags.DEFINE_integer("FINETUNE_BATCHES_PER_LOT", 1, "Number of batches per lot")
     flags.DEFINE_integer("EVAL_TRAIN_FREQUENCY", 1, "Frequency for evaluation") # 25
     flags.DEFINE_integer("EVAL_VALID_FREQUENCY", 1, "Frequency for evaluation") # 25
     flags.DEFINE_integer("EVAL_FINETUNE_TRAIN_FREQUENCY", 1, "Frequency for evaluation") # 25

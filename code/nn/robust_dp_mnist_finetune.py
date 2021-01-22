@@ -180,7 +180,7 @@ class RDPCNN:
     
 
     @lazy_method_no_scope
-    def dp_optimization(self, lr, loss, sanitizer, dp_sigma, trans_sigma=None, is_finetune=False, batched_per_lot=1, is_sigma_data_dependent=False, is_layerwised=False, scope="DP_OPT"):
+    def dp_optimization(self, loss, sanitizer, dp_sigma, trans_sigma=None, is_finetune=False, batched_per_lot=1, is_sigma_data_dependent=False, is_layerwised=False, scope="DP_OPT"):
         '''
         def no_dp():
             op, _, _, learning_rate = self.optimization(loss)
@@ -235,8 +235,12 @@ class RDPCNN:
             # reset global step
             reset_decay_op = global_step.assign(tf.constant(0))
             # decay
-            learning_rate = tf.train.exponential_decay(lr, global_step, 
-                FLAGS.LEARNING_DECAY_STEPS, FLAGS.LEARNING_DECAY_RATE)
+            if is_finetune:
+                learning_rate = tf.train.exponential_decay(FLAGS.FINETUNE_LEARNING_RATE, global_step, 
+                    FLAGS.FINETUNE_LEARNING_DECAY_STEPS, FLAGS.FINETUNE_LEARNING_DECAY_RATE)
+            else:
+                learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step, 
+                    FLAGS.LEARNING_DECAY_STEPS, FLAGS.LEARNING_DECAY_RATE)
 
             if is_finetune:
                 opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)

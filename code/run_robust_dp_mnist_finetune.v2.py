@@ -1,5 +1,5 @@
 import nn.robust_dp_mnist_finetune as model_mnist
-import os, math
+import os, math, pickle
 from PIL import Image
 from dependency import *
 import utils.model_utils_mnist as  model_utils
@@ -24,18 +24,23 @@ def main(arvg=None):
     """
     """
     if FLAGS.train:
-        train()
+        if FLAGS.TRAIN_BEFORE_FINETUNE:
+            finetune(*train())
+        else:
+            finetune()
     else:
         test()
 
 
-def test_info(sess, model, is_finetune, test_writer, graph_dict, dp_info, log_file, total_batch=None, valid=False):
+def test_info(sess, model, test_writer, graph_dict, dp_info, log_file, total_batch=None, is_finetune=False, valid=False):
     
     if is_finetune:
+        batch_size = FLAGS.FINETUNE_BATCH_SIZE
         model_loss = model.loss(graph_dict["loss_coef_holder"], model.finetune_logits)
         # acc
         model_acc = model.finetune_accuracy
     else:
+        batch_size = FLAGS.BATCH_SIZE
         model_loss = model.loss(graph_dict["loss_coef_holder"], model.clean_logits)
         model_acc = model.clean_accuracy
     
@@ -43,18 +48,18 @@ def test_info(sess, model, is_finetune, test_writer, graph_dict, dp_info, log_fi
     
     if total_batch is None:
         if valid:
-            total_batch = int(data.valid_size/FLAGS.BATCH_SIZE)
+            total_batch = int(data.valid_size/batch_size)
         else:
-            total_batch = int(data.test_size/FLAGS.BATCH_SIZE)
+            total_batch = int(data.test_size/batch_size)
     else: total_batch = total_batch
 
     acc = 0 
     loss = 0
     for idx in range(total_batch):
         if valid:
-            batch_xs, batch_ys, _ = data.next_valid_batch(FLAGS.BATCH_SIZE, True)
+            batch_xs, batch_ys, _ = data.next_valid_batch(batch_size, True)
         else:
-            batch_xs, batch_ys, _ = data.next_test_batch(FLAGS.BATCH_SIZE, True)
+            batch_xs, batch_ys, _ = data.next_test_batch(batch_size, True)
         
         if is_finetune:
             feed_dict = {
@@ -306,8 +311,7 @@ def compute_S_min_from_M(M, is_layerwised=True):
     else:
         return __compute_S_min_from_M(M)
         
-
-def train():
+def finetune(pre_dp_info=None, model_ckpt_name=None):
     """
     """
     import time
@@ -316,46 +320,37 @@ def train():
     g = tf.get_default_graph()
     # attack_target = 8
     with g.as_default():
+        batch_size = FLAGS.FINETUNE_BATCH_SIZE
         # Placeholder nodes.
-        data_holder = tf.placeholder(tf.float32, [FLAGS.BATCH_SIZE, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, FLAGS.NUM_CHANNELS])
-        noised_pre_holder = tf.placeholder(tf.float32, [FLAGS.BATCH_SIZE, 256])
-        noise_holder = tf.placeholder(tf.float32, [FLAGS.BATCH_SIZE, 256])
-        label_holder = tf.placeholder(tf.float32, [FLAGS.BATCH_SIZE, FLAGS.NUM_CLASSES])
-        if FLAGS.IS_MGM_LAYERWISED:
-            sgd_sigma_holder = [tf.placeholder(tf.float32, ()) for _ in range(FLAGS.MAX_PARAM_SIZE)]
-            trans_sigma_holder = [tf.placeholder(tf.float32, ()) for _ in range(FLAGS.MAX_PARAM_SIZE)]
-        else:
-            sgd_sigma_holder = tf.placeholder(tf.float32, ())
-            trans_sigma_holder = tf.placeholder(tf.float32, ())
+        data_holder = tf.placeholder(tf.float32, [batch_size, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, FLAGS.NUM_CHANNELS])
+        noised_pre_holder = tf.placeholder(tf.float32, [batch_size, 256])
+        noise_holder = tf.placeholder(tf.float32, [batch_size, 256])
+        label_holder = tf.placeholder(tf.float32, [batch_size, FLAGS.NUM_CLASSES])
+        sgd_sigma_holder = tf.placeholder(tf.float32, ())
+        trans_sigma_holder = tf.placeholder(tf.float32, ())
         loss_coef_holder = tf.placeholder(tf.float32, ())
         is_training = tf.placeholder(tf.bool, ())
         # model
         model = model_mnist.RDPCNN(data=data_holder, label=label_holder, input_sigma=input_sigma, is_training=is_training, noised_pre=noised_pre_holder, noise=noise_holder)
+        
+        if pre_dp_info == None:
+            print("Load Pre DP info")
+            pre_dp_info = np.load(FLAGS.DP_INFO_NPY, allow_pickle=True).item()
+        used_delta = pre_dp_info["delta"]
         priv_accountant = accountant.GaussianMomentsAccountant(data.train_size)
-        gaussian_sanitizer = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
-            [FLAGS.DP_GRAD_CLIPPING_L2NORM, True])
         finetune_gaussian_sanitizer = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
             [FLAGS.FINETUNE_DP_GRAD_CLIPPING_L2NORM, True])
 
         # model training   
-        model_clean_loss = model.loss(loss_coef_holder, model.clean_logits)
         model_finetune_loss = model.loss(loss_coef_holder, model.finetune_logits)
         model_finetune_clean_loss = model.loss(loss_coef_holder, model.finetune_clean_logits)
-        # training
-        #model_op, _, _, model_lr = model.optimization(model_loss)
-        model_op, model_lr = model.dp_optimization(
-                        FLAGS.LEARNING_RATE, model_clean_loss, 
-                        gaussian_sanitizer, sgd_sigma_holder, None, 
-                        batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
         # finetune
         model_finetune_op, model_finetune_lr = model.dp_optimization(
-                        FLAGS.FINETUNE_LEARNING_RATE, model_finetune_loss, 
-                        finetune_gaussian_sanitizer, sgd_sigma_holder, trans_sigma_holder, 
-                        is_finetune=True, batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED, scope="FINETUNE_DP_OPT")
+                        model_finetune_loss, finetune_gaussian_sanitizer, sgd_sigma_holder, trans_sigma_holder, 
+                        is_finetune=True, batched_per_lot=FLAGS.FINETUNE_BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED, scope="FINETUNE_DP_OPT")
         # analysis
         model_M, model_sens = model.compute_M_from_input_perturbation(model_finetune_clean_loss, FLAGS.FINETUNE_DP_GRAD_CLIPPING_L2NORM, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
         # acc
-        model_clean_acc = model.clean_accuracy
         model_finetune_acc = model.finetune_accuracy
 
 
@@ -373,128 +368,22 @@ def train():
     config.gpu_options.allow_growth = True
     with tf.Session(config=config, graph=g) as sess:
         sess.run(tf.global_variables_initializer())
-        if FLAGS.load_model:
-            print("model loaded.")
-            model.tf_load(sess, scope=None, name=FLAGS.CNN_CKPT_RESTORE_NAME)
-        
-        if FLAGS.load_pretrained:
-            print("model loaded.")
-            model.tf_load_pretrained(sess, scope="CNN", name=FLAGS.PRETRAINED_CNN_CKPT_RESTORE_NAME)
-        
-
-        if FLAGS.TRAIN_BEFORE_FINETUNE:
-            # training
-            if FLAGS.local:
-                total_train_lot = 2
-                total_valid_lot = 2
-            else:
-                total_train_lot = int(data.train_size/FLAGS.BATCH_SIZE/FLAGS.BATCHES_PER_LOT)
-                total_valid_lot = None
-            
-            total_dp_sigma = FLAGS.TOTAL_DP_SIGMA
-            total_dp_delta = FLAGS.TOTAL_DP_DELTA
-            total_dp_epsilon = FLAGS.TOTAL_DP_EPSILON
-            
-            print("Training...")
-            itr_count = 0
-            for epoch in range(FLAGS.NUM_EPOCHS):
-                start_time = time.time()
-                sgd_sigma = total_dp_sigma
-                sigma_trans = 0.0
-                for train_idx in range(total_train_lot):
-                #for train_idx in range(1):
-                    terminate = False
-                    for batch_idx in range(FLAGS.BATCHES_PER_LOT):
-                        batch_xs, batch_ys, _ = data.next_train_batch(FLAGS.BATCH_SIZE, True)
-                        feed_dict = {
-                            data_holder: batch_xs,
-                            label_holder: batch_ys,
-                            loss_coef_holder: FLAGS.BETA,
-                            sgd_sigma_holder: sgd_sigma,
-                            trans_sigma_holder: sigma_trans,
-                            is_training: True
-                        }
-                        sess.run(fetches=[model_op], feed_dict=feed_dict)
-                    
-                    # optimization
-                    fetches = [model_clean_loss, model_clean_acc, model_lr]
-                    loss, acc, lr = sess.run(fetches=fetches, feed_dict=feed_dict)
-                    #import pdb; pdb.set_trace()
-                    spent_eps_delta, selected_moment_orders = priv_accountant.get_privacy_spent(sess, target_eps=[total_dp_epsilon])
-                    spent_eps_delta = spent_eps_delta[0]
-                    selected_moment_orders = selected_moment_orders[0]
-                    if spent_eps_delta.spent_delta > total_dp_delta or spent_eps_delta.spent_eps > total_dp_epsilon:
-                        terminate = True
-
-                    # Print info
-                    if train_idx % FLAGS.EVAL_TRAIN_FREQUENCY == (FLAGS.EVAL_TRAIN_FREQUENCY - 1):
-                        print("Epoch: {}".format(epoch))
-                        print("Iteration: {}".format(itr_count))
-                        print("Sigma used:{}".format(sigma_trans))
-                        print("SGD Sigma: {}".format(sgd_sigma))
-                        print("Learning rate: {}".format(lr))
-                        print("Loss: {:.4f}, Accuracy: {:.4f}".format(loss, acc))
-                        print("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}".format(
-                            spent_eps_delta.spent_eps, spent_eps_delta.spent_delta, total_dp_sigma, input_sigma))
-                        print()
-                        #model.tf_save(sess) # save checkpoint
-
-                        with open(FLAGS.TRAIN_LOG_FILENAME, "a+") as file: 
-                            file.write("Epoch: {}\n".format(epoch))
-                            file.write("Iteration: {}\n".format(itr_count))
-                            file.write("Sigma used: {}\n".format(sigma_trans))
-                            file.write("SGD Sigma: {}\n".format(sgd_sigma))
-                            file.write("Learning rate: {}\n".format(lr))
-                            file.write("Loss: {:.4f}, Accuracy: {:.4f}\n".format(loss, acc))
-                            file.write("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}\n".format(
-                                spent_eps_delta.spent_eps, spent_eps_delta.spent_delta, total_dp_sigma, input_sigma))
-                            file.write("\n")
-                    if terminate:
-                        break
-                end_time = time.time()
-                print('Eopch {} completed with time {:.2f} s'.format(epoch+1, end_time-start_time))
-                if epoch % FLAGS.EVAL_VALID_FREQUENCY == (FLAGS.EVAL_VALID_FREQUENCY - 1):
-                #if epoch >= 0:
-                    # validation
-                    print("\n******************************************************************")
-                    print("Validation")
-                    dp_info = {
-                        "eps": spent_eps_delta.spent_eps,
-                        "delta": spent_eps_delta.spent_delta,
-                        "total_sigma": total_dp_sigma,
-                        "input_sigma": input_sigma
-                    }
-                    valid_dict = test_info(sess, model, False, None, graph_dict, dp_info, FLAGS.VALID_LOG_FILENAME, total_batch=None, valid=True)
-                    np.save(FLAGS.DP_INFO_NPY, dp_info, allow_pickle=True)
-                    ckpt_name='robust_dp_cnn.epoch{}.vloss{:.6f}.vacc{:.6f}.input_sigma{:.4f}.total_sigma{:.4f}.dp_eps{:.6f}.dp_delta{:.6f}.ckpt'.format(
-                            epoch,
-                            valid_dict["loss"],
-                            valid_dict["acc"],
-                            input_sigma, total_dp_sigma,
-                            spent_eps_delta.spent_eps,
-                            spent_eps_delta.spent_delta
-                            )
-                    model.tf_save(sess, name=ckpt_name) # extra store
-                
-                if epoch % FLAGS.TOTAL_DP_SIGMA_DECAY_EPOCH == FLAGS.TOTAL_DP_SIGMA_DECAY_EPOCH - 1:
-                    total_dp_sigma = max(model_utils.change_coef(total_dp_sigma, FLAGS.TOTAL_DP_SIGMA_DECAY_RATE), FLAGS.MIN_TOTAL_DP_SIGMA)
-
-                if terminate:
-                    break
+        print("model loaded.")
+        if model_ckpt_name != None:
+            model.tf_load(sess, name=model_ckpt_name)
         else:
-            print("CNN loaded.")
             model.tf_load(sess, name=FLAGS.CNN_CKPT_RESTORE_NAME)
-           
+        
         #finetune
         if FLAGS.local:
             total_train_lot = 2
             total_valid_lot = 2
         else:
-            total_train_lot = int(data.train_size/FLAGS.BATCH_SIZE/FLAGS.BATCHES_PER_LOT)
+            total_train_lot = int(data.train_size/batch_size/FLAGS.FINETUNE_BATCHES_PER_LOT)
             total_valid_lot = None
 
         total_finetune_dp_sigma = FLAGS.TOTAL_FINETUNE_DP_SIGMA
-        total_finetune_dp_delta = FLAGS.TOTAL_FINETUNE_DP_DELTA
+        total_finetune_dp_delta = FLAGS.TOTAL_FINETUNE_DP_DELTA - used_delta
         total_finetune_dp_epsilon = FLAGS.TOTAL_FINETUNE_DP_EPSILON
 
         print("Finetuning...")
@@ -507,8 +396,10 @@ def train():
             for train_idx in range(total_train_lot):
             #for train_idx in range(1):
                 terminate = False
-                for batch_idx in range(FLAGS.BATCHES_PER_LOT):
-                    batch_xs, batch_ys, _ = data.next_train_batch(FLAGS.BATCH_SIZE, True)
+                lot_feeds = []
+                lot_M = []
+                for batch_idx in range(FLAGS.FINETUNE_BATCHES_PER_LOT):
+                    batch_xs, batch_ys, _ = data.next_train_batch(batch_size, True)
                     feed_dict = {
                         data_holder: batch_xs,
                         is_training: True
@@ -526,24 +417,31 @@ def train():
                     #import pdb; pdb.set_trace()
                     #batch_S_min = sess.run(fetches=model_S_min[0], feed_dict=feed_dict)
                     batch_M = sess.run(fetches=model_M, feed_dict=feed_dict)
-                    batch_S_min = compute_S_min_from_M(batch_M, FLAGS.IS_MGM_LAYERWISED)/FLAGS.FINETUNE_DP_GRAD_CLIPPING_L2NORM
-                    #import pdb; pdb.set_trace()
-                    min_S_min = batch_S_min
-                    sigma_trans = input_sigma * min_S_min
-                    
-                    if sigma_trans >= total_finetune_dp_sigma:
-                        sgd_sigma = 0.0
-                    else: 
-                        sgd_sigma = total_finetune_dp_sigma - sigma_trans
-                        sigma_trans = total_finetune_dp_sigma
+                    #batch_S_min = compute_S_min_from_M(batch_M, FLAGS.IS_MGM_LAYERWISED)/FLAGS.FINETUNE_DP_GRAD_CLIPPING_L2NORM
+
+                    lot_feeds.append(feed_dict)
+                    lot_M.append(batch_M)
+                lot_M = sum(lot_M) / (FLAGS.FINETUNE_BATCHES_PER_LOT**2)
+                lot_S_min = compute_S_min_from_M(lot_M, FLAGS.IS_MGM_LAYERWISED)/FLAGS.FINETUNE_DP_GRAD_CLIPPING_L2NORM
+                #import pdb; pdb.set_trace()
+                min_S_min = lot_S_min
+                sigma_trans = input_sigma * min_S_min
+                
+                if sigma_trans >= total_finetune_dp_sigma:
+                    sgd_sigma = 0.0
+                else: 
+                    sgd_sigma = total_finetune_dp_sigma - sigma_trans
+                    sigma_trans = total_finetune_dp_sigma
+                
+                for feed_dict in lot_feeds:
                     # DP-SGD
-                    itr_count += 1
                     feed_dict[sgd_sigma_holder] = sgd_sigma
                     feed_dict[trans_sigma_holder] = sigma_trans
                     sess.run(fetches=[model_finetune_op], feed_dict=feed_dict)
 
-                    if itr_count > FLAGS.MAX_FINETUNE_ITERATIONS:
-                        terminate = True
+                itr_count += 1
+                if itr_count > FLAGS.MAX_FINETUNE_ITERATIONS:
+                    terminate = True
                
                 # for input transofrmation
                 if train_idx % 1 == 0:
@@ -601,7 +499,7 @@ def train():
                     "total_sigma": total_finetune_dp_sigma,
                     "input_sigma": input_sigma
                 }
-                valid_dict = test_info(sess, model, True, None, graph_dict, dp_info, FLAGS.FINETUNE_VALID_LOG_FILENAME, total_batch=None, valid=True)
+                valid_dict = test_info(sess, model, None, graph_dict, dp_info, FLAGS.FINETUNE_VALID_LOG_FILENAME, total_batch=None, is_finetune=True, valid=True)
                 np.save(FLAGS.FINETUNE_DP_INFO_NPY, dp_info, allow_pickle=True)
                 ckpt_name='finetune.robust_dp_cnn.epoch{}.vloss{:.6f}.vacc{:.6f}.input_sigma{:.4f}.total_sigma{:.4f}.dp_eps{:.6f}.dp_delta{:.6f}.ckpt'.format(
                         epoch,
@@ -630,18 +528,204 @@ def train():
             "total_sigma": total_finetune_dp_sigma,
             "input_sigma": input_sigma
         }
-        valid_dict = test_info(sess, model, True, None, graph_dict, dp_info, None, total_batch=None, valid=True)
+        test_dict = test_info(sess, model, None, graph_dict, dp_info, FLAGS.FINETUNE_TEST_LOG_FILENAME, total_batch=None, is_finetune=True, valid=False)
         np.save(FLAGS.FINETUNE_DP_INFO_NPY, dp_info, allow_pickle=True)
                 
-        ckpt_name='finetune.robust_dp_cnn.epoch{}.vloss{:.6f}.vacc{:.6f}.input_sigma{:.4f}.total_sigma{:.4f}.dp_eps{:.6f}.dp_delta{:.6f}.ckpt'.format(
+        ckpt_name='finetune.robust_dp_cnn.epoch{}.tloss{:.6f}.tacc{:.6f}.input_sigma{:.4f}.total_sigma{:.4f}.dp_eps{:.6f}.dp_delta{:.6f}.ckpt'.format(
             epoch,
-            valid_dict["loss"],
-            valid_dict["acc"],
+            test_dict["loss"],
+            test_dict["acc"],
             input_sigma, total_finetune_dp_sigma,
             spent_eps_delta.spent_eps,
             spent_eps_delta.spent_delta
         )
         model.tf_save(sess, name=ckpt_name) # extra store
+
+
+def train():
+    """
+    """
+    import time
+    input_sigma = FLAGS.INPUT_SIGMA
+    tf.reset_default_graph()
+    g = tf.get_default_graph()
+    # attack_target = 8
+    with g.as_default():
+        batch_size = FLAGS.BATCH_SIZE
+        # Placeholder nodes.
+        data_holder = tf.placeholder(tf.float32, [batch_size, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, FLAGS.NUM_CHANNELS])
+        noised_pre_holder = tf.placeholder(tf.float32, [batch_size, 256])
+        noise_holder = tf.placeholder(tf.float32, [batch_size, 256])
+        label_holder = tf.placeholder(tf.float32, [batch_size, FLAGS.NUM_CLASSES])
+        sgd_sigma_holder = tf.placeholder(tf.float32, ())
+        trans_sigma_holder = tf.placeholder(tf.float32, ())
+        loss_coef_holder = tf.placeholder(tf.float32, ())
+        is_training = tf.placeholder(tf.bool, ())
+        # model
+        model = model_mnist.RDPCNN(data=data_holder, label=label_holder, input_sigma=input_sigma, is_training=is_training, noised_pre=noised_pre_holder, noise=noise_holder)
+        priv_accountant = accountant.GaussianMomentsAccountant(data.train_size)
+        gaussian_sanitizer = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
+            [FLAGS.DP_GRAD_CLIPPING_L2NORM, True])
+        
+
+        # model training   
+        model_clean_loss = model.loss(loss_coef_holder, model.clean_logits)
+        # training
+        #model_op, _, _, model_lr = model.optimization(model_loss)
+        model_op, model_lr = model.dp_optimization(
+                        model_clean_loss, gaussian_sanitizer, sgd_sigma_holder, None, 
+                        batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
+        # acc
+        model_clean_acc = model.clean_accuracy
+
+        graph_dict = {}
+        graph_dict["data_holder"] = data_holder
+        graph_dict["noised_pre_holder"] = noised_pre_holder
+        graph_dict["noise_holder"] = noise_holder
+        graph_dict["label_holder"] = label_holder
+        graph_dict["loss_coef_holder"] = loss_coef_holder
+        graph_dict["sgd_sigma_holder"] = sgd_sigma_holder
+        graph_dict["trans_sigma_holder"] = trans_sigma_holder
+        graph_dict["is_training"] = is_training
+
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    with tf.Session(config=config, graph=g) as sess:
+        sess.run(tf.global_variables_initializer())
+        if FLAGS.load_model:
+            print("model loaded.")
+            model.tf_load(sess, scope=None, name=FLAGS.CNN_CKPT_RESTORE_NAME)
+        
+        if FLAGS.load_pretrained:
+            print("model loaded.")
+            model.tf_load_pretrained(sess, scope="CNN", name=FLAGS.PRETRAINED_CNN_CKPT_RESTORE_NAME)
+        
+
+        # training
+        if FLAGS.local:
+            total_train_lot = 2
+            total_valid_lot = 2
+        else:
+            total_train_lot = int(data.train_size/batch_size/FLAGS.BATCHES_PER_LOT)
+            total_valid_lot = None
+        
+        total_dp_sigma = FLAGS.TOTAL_DP_SIGMA
+        total_dp_delta = FLAGS.TOTAL_DP_DELTA
+        total_dp_epsilon = FLAGS.TOTAL_DP_EPSILON
+        
+        print("Training...")
+        itr_count = 0
+        for epoch in range(FLAGS.NUM_EPOCHS):
+            start_time = time.time()
+            sgd_sigma = total_dp_sigma
+            sigma_trans = 0.0
+            for train_idx in range(total_train_lot):
+            #for train_idx in range(1):
+                terminate = False
+                for batch_idx in range(FLAGS.BATCHES_PER_LOT):
+                    batch_xs, batch_ys, _ = data.next_train_batch(batch_size, True)
+                    feed_dict = {
+                        data_holder: batch_xs,
+                        label_holder: batch_ys,
+                        loss_coef_holder: FLAGS.BETA,
+                        sgd_sigma_holder: sgd_sigma,
+                        trans_sigma_holder: sigma_trans,
+                        is_training: True
+                    }
+                    sess.run(fetches=[model_op], feed_dict=feed_dict)
+                
+                # optimization
+                fetches = [model_clean_loss, model_clean_acc, model_lr]
+                loss, acc, lr = sess.run(fetches=fetches, feed_dict=feed_dict)
+                #import pdb; pdb.set_trace()
+                spent_eps_delta, selected_moment_orders = priv_accountant.get_privacy_spent(sess, target_eps=[total_dp_epsilon])
+                spent_eps_delta = spent_eps_delta[0]
+                selected_moment_orders = selected_moment_orders[0]
+                if spent_eps_delta.spent_delta > total_dp_delta or spent_eps_delta.spent_eps > total_dp_epsilon:
+                    terminate = True
+
+                # Print info
+                if train_idx % FLAGS.EVAL_TRAIN_FREQUENCY == (FLAGS.EVAL_TRAIN_FREQUENCY - 1):
+                    print("Epoch: {}".format(epoch))
+                    print("Iteration: {}".format(itr_count))
+                    print("Sigma used:{}".format(sigma_trans))
+                    print("SGD Sigma: {}".format(sgd_sigma))
+                    print("Learning rate: {}".format(lr))
+                    print("Loss: {:.4f}, Accuracy: {:.4f}".format(loss, acc))
+                    print("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}".format(
+                        spent_eps_delta.spent_eps, spent_eps_delta.spent_delta, total_dp_sigma, input_sigma))
+                    print()
+                    #model.tf_save(sess) # save checkpoint
+
+                    with open(FLAGS.TRAIN_LOG_FILENAME, "a+") as file: 
+                        file.write("Epoch: {}\n".format(epoch))
+                        file.write("Iteration: {}\n".format(itr_count))
+                        file.write("Sigma used: {}\n".format(sigma_trans))
+                        file.write("SGD Sigma: {}\n".format(sgd_sigma))
+                        file.write("Learning rate: {}\n".format(lr))
+                        file.write("Loss: {:.4f}, Accuracy: {:.4f}\n".format(loss, acc))
+                        file.write("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}\n".format(
+                            spent_eps_delta.spent_eps, spent_eps_delta.spent_delta, total_dp_sigma, input_sigma))
+                        file.write("\n")
+                if terminate:
+                    break
+            end_time = time.time()
+            print('Eopch {} completed with time {:.2f} s'.format(epoch+1, end_time-start_time))
+            if epoch % FLAGS.EVAL_VALID_FREQUENCY == (FLAGS.EVAL_VALID_FREQUENCY - 1):
+            #if epoch >= 0:
+                # validation
+                print("\n******************************************************************")
+                print("Validation")
+                dp_info = {
+                    "eps": spent_eps_delta.spent_eps,
+                    "delta": spent_eps_delta.spent_delta,
+                    "total_sigma": total_dp_sigma,
+                    "input_sigma": input_sigma
+                }
+                valid_dict = test_info(sess, model, None, graph_dict, dp_info, FLAGS.VALID_LOG_FILENAME, total_batch=None, is_finetune=False, valid=True)
+                np.save(FLAGS.DP_INFO_NPY, dp_info, allow_pickle=True)
+                ckpt_name='robust_dp_cnn.epoch{}.vloss{:.6f}.vacc{:.6f}.input_sigma{:.4f}.total_sigma{:.4f}.dp_eps{:.6f}.dp_delta{:.6f}.ckpt'.format(
+                        epoch,
+                        valid_dict["loss"],
+                        valid_dict["acc"],
+                        input_sigma, total_dp_sigma,
+                        spent_eps_delta.spent_eps,
+                        spent_eps_delta.spent_delta
+                        )
+                model.tf_save(sess, name=ckpt_name) # extra store
+            
+            if epoch % FLAGS.TOTAL_DP_SIGMA_DECAY_EPOCH == FLAGS.TOTAL_DP_SIGMA_DECAY_EPOCH - 1:
+                total_dp_sigma = max(model_utils.change_coef(total_dp_sigma, FLAGS.TOTAL_DP_SIGMA_DECAY_RATE), FLAGS.MIN_TOTAL_DP_SIGMA)
+
+            if terminate:
+                break
+           
+        dp_info = {
+            "eps": spent_eps_delta.spent_eps,
+            "delta": spent_eps_delta.spent_delta,
+            "total_sigma": total_dp_sigma,
+            "input_sigma": input_sigma
+        }
+        test_dict = test_info(sess, model, None, graph_dict, dp_info, FLAGS.TEST_LOG_FILENAME, total_batch=None, is_finetune=False, valid=False)
+        np.save(FLAGS.DP_INFO_NPY, dp_info, allow_pickle=True)
+                
+        ckpt_name='robust_dp_cnn.epoch{}.tloss{:.6f}.tacc{:.6f}.input_sigma{:.4f}.total_sigma{:.4f}.dp_eps{:.6f}.dp_delta{:.6f}.ckpt'.format(
+            epoch,
+            test_dict["loss"],
+            test_dict["acc"],
+            input_sigma, total_dp_sigma,
+            spent_eps_delta.spent_eps,
+            spent_eps_delta.spent_delta
+        )
+        model.tf_save(sess, name=ckpt_name) # extra store
+        
+   
+        
+
+    return dp_info, ckpt_name
+        
+           
+        
 
 
 
