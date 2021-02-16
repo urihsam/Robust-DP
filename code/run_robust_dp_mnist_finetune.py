@@ -30,14 +30,13 @@ def main(arvg=None):
 
 
 def test_info(sess, model, test_writer, graph_dict, dp_info, log_file, total_batch=None, is_finetune=False, valid=False):
-    
+    batch_size = FLAGS.BATCH_SIZE
     if is_finetune:
-        batch_size = FLAGS.FINETUNE_BATCH_SIZE
         model_loss = model.loss(graph_dict["loss_coef_holder"], model.finetune_logits)
         # acc
         model_acc = model.finetune_accuracy
     else:
-        batch_size = FLAGS.BATCH_SIZE
+        
         model_loss = model.loss(graph_dict["loss_coef_holder"], model.clean_logits)
         model_acc = model.clean_accuracy
     

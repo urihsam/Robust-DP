@@ -1,6 +1,6 @@
 import nn.mnist_classifier as mnist_cnn
 import utils.net_element as ne
-from differential_privacy.dp_sgd.dp_optimizer import dp_optimizer_v2 as dp_optimizer
+from differential_privacy.dp_sgd.dp_optimizer import dp_optimizer_v3 as dp_optimizer
 from tensorflow.python.ops.parallel_for.gradients import jacobian, batch_jacobian
 from differential_privacy.dp_sgd.per_example_gradients import per_example_gradients
 from differential_privacy.dp_sgd.dp_optimizer import utils
@@ -17,68 +17,59 @@ class RDPCNN:
 
     def __init__(self, data, label, input_sigma, is_training, noised_pretrain=None, noise=None):
         self.label = label
-        self.data = data
+        self.data = tf.image.resize(data, [224, 224], method=tf.image.ResizeMethod.BILINEAR)
+        #self.data = data
         self.input_sigma = input_sigma
         self.is_training = is_training
         #
         tf.debugging.set_log_device_placement(True)
         gpus = tf.config.experimental.list_logical_devices('GPU')
-        #with tf.device(gpus[0].name): 
-
-        tiled_data = tf.tile(self.data, [1,1,1,3])
+        #with tf.device(gpus[0].name):
 
         # cnn model
-        with tf.variable_scope('CNN') as scope:
-            pre_trained = nets.VGG19(tiled_data, is_training=False, early_stem=True, stem=True)
-            net =  tf.identity(pre_trained)
-            print(net.get_shape().as_list())
-            initializer = tf.contrib.layers.variance_scaling_initializer(factor=1.0, mode='FAN_AVG', uniform=True)
-            
-            w_1 = tf.get_variable(initializer=initializer, shape=(3, 3, net.get_shape().as_list()[-1], 128), name="w_1")
-            b_1 = tf.get_variable(initializer=initializer, shape=(128), name="b_1")
-            net = tf.nn.conv2d(net, w_1, strides=[1, 1, 1, 1], padding="SAME")+ b_1
-            net = tf.nn.leaky_relu(net)
-            net = tf.reshape(net, [FLAGS.BATCH_SIZE, -1])
-        self.pretrain_cnn = net
-        
-        self.noised_pretrain = noised_pretrain
-        self.pretrain = self.noised_pretrain - noise
-        
+        self.pre_trained = nets.VGG19(self.data, is_training=False, classes=100, use_logits=True)
+        self.pre_trained_cnn = tf.reshape(self.pre_trained, [self.pre_trained.get_shape().as_list()[0], -1])
+        #import pdb; pdb.set_trace()
+
+        self.noised_pre = noised_pretrain
+        self.pre = self.noised_pre- noise
+
+        initializer = tf.contrib.layers.variance_scaling_initializer(factor=1.0, mode='FAN_AVG', uniform=True)
         with tf.variable_scope('top_layers') as opt_scope_1:
-            w_2 = tf.get_variable(initializer=initializer, shape=(self.noised_pretrain.get_shape().as_list()[-1], 16), name="w_2")
-            b_2 = tf.get_variable(initializer=initializer, shape=(16), name="b_2")
-            w_3 = tf.get_variable(initializer=initializer, shape=(16,10), name="w_3")
-            b_3 = tf.get_variable(initializer=initializer, shape=(10), name="b_3")
-            
-            net = self.noised_pretrain
+            w_1 = tf.get_variable(initializer=initializer, shape=(self.noised_pre.get_shape().as_list()[-1], 32), name="w_1")
+            b_1 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(32), name="b_1")
+            w_2 = tf.get_variable(initializer=initializer, shape=(32, 10), name="w_2")
+            b_2 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(10), name="b_2")
+
+            net = self.noised_pre
             #net = ne.layer_norm(self.noised_pretrain, self.is_training)
-            net = tf.nn.leaky_relu(tf.add(tf.matmul(net, w_2), b_2))
+            net = tf.nn.leaky_relu(tf.add(tf.matmul(net, w_1), b_1))
             #net = ne.layer_norm(net, self.is_training)
 
-            self.cnn_logits = tf.add(tf.matmul(net, w_3), b_3)
+            self.cnn_logits = tf.add(tf.matmul(net, w_2), b_2)
             #self.cnn_logits = tf.add(tf.matmul(net, w_2), b_2)
             self.cnn_prediction = tf.nn.softmax(self.cnn_logits)
-            
+
             correct_pred = tf.equal(tf.argmax(self.cnn_prediction, 1), tf.argmax(self.label, 1))
             self.cnn_accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32), name='accuracy')
 
         self.opt_scope_1 = opt_scope_1
         # recon
         with tf.variable_scope(opt_scope_1, reuse=True):
-            w_2 = tf.get_variable(initializer=initializer, shape=(self.pretrain.get_shape().as_list()[-1], 16), name="w_2")
-            b_2 = tf.get_variable(initializer=initializer, shape=(16), name="b_2")
-            w_3 = tf.get_variable(initializer=initializer, shape=(16,10), name="w_3")
-            b_3 = tf.get_variable(initializer=initializer, shape=(10), name="b_3")
-            
-            net = self.pretrain
+            #w_1 = tf.get_variable(initializer=initializer, shape=(self.noised_pre.get_shape().as_list()[-1], 32), name="w_1")
+            #b_1 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(32), name="b_1")
+            #w_2 = tf.get_variable(initializer=initializer, shape=(32, 10), name="w_2")
+            #b_2 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(10), name="b_2")
+
+            net = self.pre
             #net = ne.layer_norm(self.pretrain, self.is_training)
-            net = tf.nn.leaky_relu(tf.add(tf.matmul(net, w_2), b_2))
+            net = tf.nn.leaky_relu(tf.add(tf.matmul(net, w_1), b_1))
             #net = ne.layer_norm(net, self.is_training)
 
-            self.cnn_clean_logits = tf.add(tf.matmul(net, w_3), b_3)
+            self.cnn_clean_logits = tf.add(tf.matmul(net, w_2), b_2)
             #self.cnn_clean_logits = tf.add(tf.matmul(net, w_2), b_2)
             self.cnn_clean_prediction = tf.nn.softmax(self.cnn_clean_logits)
-            
+
             correct_pred = tf.equal(tf.argmax(self.cnn_clean_prediction, 1), tf.argmax(self.label, 1))
             self.cnn_clean_accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32), name='accuracy')
 
@@ -111,10 +102,20 @@ class RDPCNN:
         loss = FLAGS.BETA * tf.losses.softmax_cross_entropy(self.label, self.cnn_clean_logits)
         tf.summary.scalar("Total_loss_clean", loss)
         return loss
-    
-    
+
+
+    @lazy_method
+    def loss_reg(self):
+        opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
+        #print tf.GraphKeys.TRAINABLE_VARIABLES
+        reg_term = FLAGS.REG_SCALE * sum([tf.reduce_sum(tf.square(param)) for param in opt_vars])
+        #reg_term = FLAGS.REG_SCALE * sum([tf.reduce_sum(tf.math.abs(param)) for param in opt_vars])
+
+        tf.summary.scalar("Reg_loss", reg_term)
+        return reg_term
+
     @lazy_method_no_scope
-    def compute_M_from_input_perturbation(self, loss, l2norm_bound, is_layerwised=False, scope="DP_S_MIN"):
+    def compute_M_from_input_perturbation(self, loss_list, l2norm_bound, is_layerwised=False, scope="DP_S_MIN"):
         with tf.variable_scope(scope):
             ex = self.noised_pre
             var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
@@ -122,7 +123,17 @@ class RDPCNN:
             xs = [tf.convert_to_tensor(x) for x in var_list]
             #import pdb; pdb.set_trace()
             # Each element in px_grads is the px_grad for a param matrix, having the shape of [batch_size, shape of param matrix]
-            px_grads = per_example_gradients.PerExampleGradients(loss, xs)
+            #px_grads = per_example_gradients.PerExampleGradients(loss, xs)
+            px_grads_per_loss = []
+            for loss in loss_list:
+                px_grads_per_loss.append(per_example_gradients.PerExampleGradients(loss, xs))
+            per_loss_px_grads = list(zip(*px_grads_per_loss))
+            px_grads = []
+            for grads in per_loss_px_grads:
+                s_ = tf.constant(0.0)
+                for g_ in grads:
+                    s_ += g_
+                px_grads.append(s_)
             # calculate sigma, sigma has the shape of [batch_size]
 
             # layer-wised
@@ -133,14 +144,14 @@ class RDPCNN:
                     px_grad_vec = tf.reshape(px_grad, [tf.shape(px_grad)[0], -1]) # [batch_size, vec_param]
                     # Clipping
                     #px_grad_vec = utils.BatchClipByL2norm(px_grad_vec, FLAGS.DP_GRAD_CLIPPING_L2NORM)
-                    
+
                     px_pp_grad = batch_jacobian(px_grad_vec, ex, use_pfor=False, parallel_iterations=px_grad_vec.get_shape().as_list()[0]*px_grad_vec.get_shape().as_list()[1]) # [b, vec_param, ex_shape]
                     px_pp_jac = tf.reshape(px_pp_grad, [px_pp_grad.get_shape().as_list()[0], px_pp_grad.get_shape().as_list()[1],-1]) #[b, vec_param, ex_size]
                     #
                     M = tf.reduce_mean(tf.matmul(px_pp_jac, tf.transpose(px_pp_jac, [0, 2, 1])), axis=0)/tf.shape(px_grad)[0] #[b, vec_param, vec_param]
                     #M = tf.matmul(px_pp_jac, tf.transpose(px_pp_jac, [0, 2, 1])) #[b, vec_param, vec_param]
-                    
-                    
+
+
                     Ms.append(M)
                     sens.append(px_grad_vec)
                 #S_mins = tf.stack(S_mins, axis=1)
@@ -160,10 +171,10 @@ class RDPCNN:
                 #M = tf.matmul(px_pp_jac, tf.transpose(px_pp_jac, [0, 2, 1])) #[b, vec_param, vec_param]
 
                 #b_left = tf.linalg.lstsq(px_pp_jac, tf.eye(px_pp_grad.get_shape().as_list()[1], batch_shape=[px_pp_grad.get_shape().as_list()[0]]))
-                
+
                 return M, px_grad_vec
 
-    
+
     def vars_size(self):
         return len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name))
     
@@ -174,7 +185,7 @@ class RDPCNN:
         def no_dp():
             op, _, _, learning_rate = self.optimization(loss)
             return op, learning_rate
-        
+
         def dp():
             with tf.variable_scope(scope):
                 """
@@ -188,12 +199,12 @@ class RDPCNN:
                 # reset global step
                 reset_decay_op = global_step.assign(tf.constant(0))
                 # decay
-                learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step, 
+                learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step,
                     FLAGS.LEARNING_DECAY_STEPS, FLAGS.LEARNING_DECAY_RATE)
 
                 opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
 
-                
+
                 # dp opt
                 optimizer = dp_optimizer.DPGradientDescentOptimizer(
                     learning_rate,
@@ -201,7 +212,7 @@ class RDPCNN:
                     sanitizer,
                     sigma=dp_sigma,
                     batches_per_lot=batched_per_lot)
-                
+
                 # this is the dp minimization
                 #import pdb; pdb.set_trace()
                 #grads_and_vars = optimizer.compute_gradients(loss, var_list=opt_vars)
@@ -224,19 +235,12 @@ class RDPCNN:
             # reset global step
             reset_decay_op = global_step.assign(tf.constant(0))
             # decay
-            if is_finetune:
-                learning_rate = tf.train.exponential_decay(FLAGS.FINETUNE_LEARNING_RATE, global_step, 
-                    FLAGS.FINETUNE_LEARNING_DECAY_STEPS, FLAGS.FINETUNE_LEARNING_DECAY_RATE)
-            else:
-                learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step, 
+            learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step,
                     FLAGS.LEARNING_DECAY_STEPS, FLAGS.LEARNING_DECAY_RATE)
 
-            if is_finetune:
-                opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
-            else:
-                opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+            opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
 
-            
+
             # dp opt
             optimizer = dp_optimizer.DPGradientDescentOptimizer(
                 learning_rate,
@@ -247,12 +251,14 @@ class RDPCNN:
                 batches_per_lot=batched_per_lot,
                 is_sigma_layerwised=is_layerwised,
                 is_sigma_data_dependent=is_sigma_data_dependent)
-            
+
             # this is the dp minimization
             #import pdb; pdb.set_trace()
             #grads_and_vars = optimizer.compute_gradients(loss, var_list=opt_vars)
             #op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
             # global_step is incremented by one after the variables have been updated.
+            if not isinstance(loss, list):
+                loss = [loss]
             op = optimizer.minimize(loss, global_step=global_step, var_list=opt_vars)
             tf.summary.scalar("Learning_rate", learning_rate)
             return op, learning_rate
@@ -272,7 +278,7 @@ class RDPCNN:
             # reset global step
             reset_decay_op = global_step.assign(tf.constant(0))
             # decay
-            learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step, 
+            learning_rate = tf.train.exponential_decay(FLAGS.LEARNING_RATE, global_step,
                 FLAGS.LEARNING_DECAY_STEPS, FLAGS.LEARNING_DECAY_RATE)
 
             opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
@@ -287,14 +293,14 @@ class RDPCNN:
                 optimizer = tf.train.MomentumOptimizer(learning_rate, momentum, use_nesterov=False)
             elif FLAGS.OPT_TYPE == "ADAM":
                 optimizer = tf.train.AdamOptimizer(learning_rate)
-            
+
             grads_and_vars = optimizer.compute_gradients(loss, var_list=opt_vars)
 
             gradients, variables = zip(*grads_and_vars)  # unzip list of tuples
             # accumulate
             if accum_iters != 1:
-                accum_grads = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False) for var in variables]                                        
-                
+                accum_grads = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False) for var in variables]
+
                 zero_op = [grads.assign(tf.zeros_like(grads)) for grads in accum_grads]
                 accum_op = [accum_grads[i].assign_add(g) for i, g in enumerate(gradients) if g!= None]
                 avg_op = [grads.assign(grads/accum_iters) for grads in accum_grads]
@@ -329,21 +335,16 @@ class RDPCNN:
             tf.summary.scalar("Learning_rate", learning_rate)
             return op, (zero_op, accum_op, avg_op), reset_decay_op, learning_rate
 
-    def tf_load_pretrained(self, sess, scope="CNN", name='robust_dp_cnn.ckpt'):
-        #saver = tf.train.Saver(dict(self.conv_filters, **self.conv_biases, **self.decv_filters, **self.decv_biases))
-        var_list=tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
-        saver = tf.train.Saver(var_list=var_list)
-        path = FLAGS.PRETRAINED_CNN_PATH
-        if not os.path.exists(path):
-            print("Wrong path: {}".format(path))
-        saver.restore(sess, path +'/'+name)
-        print("Restore model from {}".format(path +'/'+name))
+
+    def tf_load_pretrained(self, sess):
+        print("pre trained layers loaded.")
+        sess.run(self.pre_trained.pretrained())
 
 
     def tf_load(self, sess, scope=None, name='robust_dp_cnn.ckpt'):
         #saver = tf.train.Saver(dict(self.conv_filters, **self.conv_biases, **self.decv_filters, **self.decv_biases))
         if scope == None:
-            var_list=tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="CNN") + tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
+            var_list=tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
         else:
             var_list=tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
         saver = tf.train.Saver(var_list=var_list)
@@ -357,7 +358,7 @@ class RDPCNN:
     def tf_save(self, sess, scope=None, name='robust_dp_cnn.ckpt'):
         #saver = tf.train.Saver(dict(self.conv_filters, **self.conv_biases, **self.decv_filters, **self.decv_biases))
         if scope == None:
-            var_list=tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="CNN") + tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
+            var_list=tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
 
         else:
             var_list=tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
