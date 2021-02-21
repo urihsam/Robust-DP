@@ -34,7 +34,8 @@ class RDPCNN:
         self.noised_pre = noised_pretrain
         self.pre = self.noised_pre- noise
 
-        initializer = tf.contrib.layers.variance_scaling_initializer(factor=1.0, mode='FAN_AVG', uniform=True)
+        initializer = tf.contrib.layers.variance_scaling_initializer(factor=1.0, mode='FAN_IN', uniform=True)
+        initializer2 = tf.contrib.layers.variance_scaling_initializer(factor=1.0, mode='FAN_AVG', uniform=False) 
         with tf.variable_scope('top_layers') as opt_scope_1:
             w_1 = tf.get_variable(initializer=initializer, shape=(4, 4, 4, 4), name="W_conv_1")
             b_1 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(4), name="b_conv_1")
@@ -48,7 +49,7 @@ class RDPCNN:
         with tf.variable_scope('top_layers_2') as opt_scope_2:
             w_5 = tf.get_variable(initializer=initializer, shape=(4, 4, 4, 4), name="W_conv_5")
             b_5 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(4), name="b_conv_5")
-            w_6 = tf.get_variable(initializer=initializer, shape=(64, 10), name="W_6")
+            w_6 = tf.get_variable(initializer=initializer2, shape=(64, 10), name="W_6")
             b_6 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(10), name="b_6")
 
             net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_5, strides=[1, 2, 2, 1], padding="SAME")+ b_5)

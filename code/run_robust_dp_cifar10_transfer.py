@@ -491,6 +491,7 @@ def train():
                     print("Sigma trans: ", sigma_trans_2)
                     print("Sigma grads: ", sgd_sigma_2)
                 
+                '''
                 # run op for top_2_layers
                 for feed_dict in lot_feeds:
                     feed_dict[sgd_sigma_holder] = sgd_sigma_2
@@ -501,6 +502,17 @@ def train():
                 for feed_dict in lot_feeds:
                     batch_M_1 = sess.run(fetches=model_M_1, feed_dict=feed_dict)
                     lot_M.append(batch_M_1)
+                '''
+                lot_M = []
+                # run op for top_2_layers; cal M for top_1_layers
+                for feed_dict in lot_feeds:
+                    feed_dict[sgd_sigma_holder] = sgd_sigma_2
+                    feed_dict[trans_sigma_holder] = sigma_trans_2
+                    sess.run(fetches=model_op_2, feed_dict=feed_dict)
+                    #
+                    batch_M_1 = sess.run(fetches=model_M_1, feed_dict=feed_dict)
+                    lot_M.append(batch_M_1)
+
                 
                 min_S_min_1, sgd_sigma_1, sigma_trans_1 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM_1)
                 # for input transofrmation

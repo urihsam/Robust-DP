@@ -1,4 +1,4 @@
-import nn.robust_dp_cifar10_transfer as model_cifar10
+import nn.robust_dp_cifar10_transfer_v3 as model_cifar10
 import os, math
 from PIL import Image
 from dependency import *
@@ -32,10 +32,20 @@ def main(arvg=None):
 
 
 def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=None):
-    model_loss = model.loss()
-    model_loss_reg = model.loss_reg()
+    total_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+    top_1_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, model.opt_scope_1.name)
+    bott_opt_vars = []
+    for v_ in total_opt_vars:
+        if v_ not in top_1_opt_vars and "logits" not in v_.name:
+            bott_opt_vars.append(v_)
+
+    model_loss = model.loss(FLAGS.BETA)
+    model_loss_bott = model.loss_bott(FLAGS.BETA_BOTT)
+    model_loss_reg_1 = model.loss_reg(FLAGS.REG_SCALE, top_1_opt_vars)
+    model_loss_reg_bott = model.loss_reg(FLAGS.REG_SCALE_BOTT, bott_opt_vars)
     model_acc = model.cnn_accuracy
     input_sigma = dp_info["input_sigma"]
+    
 
     full_data = False
     
@@ -50,7 +60,10 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
 
     acc = 0 
     loss = 0
-    reg = 0
+    loss_bott = 0
+    reg0 = 0
+    reg1 = 0
+    reg2 = 0
     for b_idx in range(total_batch):
         if is_valid:
             data.shuffle_valid()
@@ -73,33 +86,38 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
         #batch_xs = np.tile(batch_xs, [1,1,1,3])
         noise = np.random.normal(loc=0.0, scale=input_sigma, size=batch_pretrain.shape)
         feed_dict = {
+            graph_dict["data_holder"]: batch_xs,
             graph_dict["noise_holder"]: noise,
             graph_dict["noised_pretrain_holder"]: batch_pretrain+noise,
             graph_dict["label_holder"]: batch_ys,
             graph_dict["is_training"]: False
         }
-        fetches = [model_loss, model_loss_reg, model_acc]
+        fetches = [model_loss, model_loss_bott, model_loss_reg_bott, model_loss_reg_1, model_acc]
         feed_dict[graph_dict["sgd_sigma_holder"]] = 0.0
         feed_dict[graph_dict["trans_sigma_holder"]] = 0.0
 
-        batch_loss, batch_reg, batch_acc = sess.run(fetches=fetches, feed_dict=feed_dict)
+        batch_loss, batch_loss_bott, batch_reg0, batch_reg1, batch_acc = sess.run(fetches=fetches, feed_dict=feed_dict)
         acc += batch_acc
-        reg += batch_reg
+        reg0 += batch_reg0
+        reg1 += batch_reg1
         loss += batch_loss
+        loss_bott += batch_loss_bott
         
     acc /= total_batch
-    reg /= total_batch
+    reg0 /= total_batch
+    reg1 /= total_batch
     loss /= total_batch
+    loss_bott /= total_batch
 
     # Print info
-    print("Loss: {:.4f}, Reg loss: {:.4f}, Accuracy: {:.4f}".format(loss, reg, acc))
+    print("Loss: {:.4f}, Loss Bott: {:.4f}, Reg loss bott: {:.4f}, Reg loss 1: {:.4f}, Accuracy: {:.4f}".format(loss, loss_bott, reg0, reg1, acc))
     print("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}".format(
         dp_info["eps"], dp_info["delta"], dp_info["total_sigma"], dp_info["input_sigma"]))
     
     with open(log_file, "a+") as file: 
         if full_data:
             file.write("FULL DATA\n")
-        file.write("Loss: {:.4f}, Reg loss: {:.4f}, Accuracy: {:.4f}\n".format(loss, reg, acc))
+        file.write("Loss: {:.4f}, Loss Bott: {:.4f}, Reg loss bott: {:.4f}, Reg loss 1: {:.4f}, Accuracy: {:.4f}\n".format(loss, loss_bott, reg0, reg1, acc))
         file.write("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}\n".format(
         dp_info["eps"], dp_info["delta"], dp_info["total_sigma"], dp_info["input_sigma"]))
         file.write("---------------------------------------------------\n")
@@ -305,7 +323,20 @@ def compute_S_min_from_M(M, is_layerwised=True):
         return batch_S_min_layerwised
     else:
         return __compute_S_min_from_M(M)
-        
+
+def cal_sigmas(lot_M, input_sigma, clipping_norm):
+    lot_M = sum(lot_M) / (FLAGS.BATCHES_PER_LOT**2)
+    lot_S_min = compute_S_min_from_M(lot_M, FLAGS.IS_MGM_LAYERWISED)/clipping_norm
+    #import pdb; pdb.set_trace()
+    min_S_min = lot_S_min
+    sigma_trans = input_sigma * min_S_min
+    
+    if sigma_trans >= FLAGS.TOTAL_DP_SIGMA:
+        sgd_sigma = 0.0
+    else: 
+        sgd_sigma = FLAGS.TOTAL_DP_SIGMA - sigma_trans
+        sigma_trans = FLAGS.TOTAL_DP_SIGMA
+    return min_S_min, sgd_sigma, sigma_trans
 
 def train():
     """
@@ -321,11 +352,10 @@ def train():
     g = tf.get_default_graph()
     # attack_target = 8
     with g.as_default():
-
         # Placeholder nodes.
         data_holder = tf.placeholder(tf.float32, [batch_size, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, FLAGS.NUM_CHANNELS])
-        noised_pretrain_holder = tf.placeholder(tf.float32, [batch_size, 32, 32, 4])
-        noise_holder = tf.placeholder(tf.float32, [batch_size, 32, 32, 4])
+        noised_pretrain_holder = tf.placeholder(tf.float32, [batch_size, 100])
+        noise_holder = tf.placeholder(tf.float32, [batch_size, 100])
         label_holder = tf.placeholder(tf.float32, [batch_size, FLAGS.NUM_CLASSES])
         sgd_sigma_holder = tf.placeholder(tf.float32, ())
         trans_sigma_holder = tf.placeholder(tf.float32, ())
@@ -333,29 +363,37 @@ def train():
         # model
         model = model_cifar10.RDPCNN(data=data_holder, label=label_holder, input_sigma=input_sigma, is_training=is_training, noised_pretrain=noised_pretrain_holder, noise=noise_holder)
         priv_accountant = accountant.GaussianMomentsAccountant(data.train_size)
-        gaussian_sanitizer = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
-            [FLAGS.DP_GRAD_CLIPPING_L2NORM, True])
+        gaussian_sanitizer_bott = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
+            [FLAGS.DP_GRAD_CLIPPING_L2NORM_BOTT, True])
+        gaussian_sanitizer_1 = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
+            [FLAGS.DP_GRAD_CLIPPING_L2NORM_1, True])
 
         # model training   
         total_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-        top_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, model.opt_scope_1.name)
+        top_1_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, model.opt_scope_1.name)
         bott_opt_vars = []
         for v_ in total_opt_vars:
-            if v_ not in top_opt_vars and "logits" not in v_.name:
+            if v_ not in top_1_opt_vars and "logits" not in v_.name:
                 bott_opt_vars.append(v_)
         # loss
-        model_loss = model.loss()
-        model_loss_clean = model.loss_clean()
-        model_loss_bott = model.loss_bott()
-        model_loss_reg = model.loss_reg(top_opt_vars)
-        model_loss_reg_bott = model.loss_reg(bott_opt_vars)
+        model_loss = model.loss(FLAGS.BETA)
+        model_loss_clean = model.loss_clean(FLAGS.BETA)
+        model_loss_bott = model.loss_bott(FLAGS.BETA_BOTT)
+        model_loss_reg_1 = model.loss_reg(FLAGS.REG_SCALE, top_1_opt_vars)
+        model_loss_reg_bott = model.loss_reg(FLAGS.REG_SCALE_BOTT, bott_opt_vars)
         # training
-        model_bott_op, _ = model.dp_optimization([model_loss_bott, model_loss_reg_bott], gaussian_sanitizer, sgd_sigma_holder, 
-                        trans_sigma=None, opt_vars=bott_opt_vars, batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
-        model_op, model_lr = model.dp_optimization([model_loss, model_loss_reg], gaussian_sanitizer, sgd_sigma_holder,
-                        trans_sigma=trans_sigma_holder, opt_vars=top_opt_vars, batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
+        model_bott_op, _ = model.dp_optimization([model_loss_bott, model_loss_reg_bott], gaussian_sanitizer_bott, sgd_sigma_holder, 
+                        trans_sigma=None, opt_vars=bott_opt_vars, 
+                        learning_rate=FLAGS.LEARNING_RATE_0, lr_decay_steps=FLAGS.LEARNING_DECAY_STEPS_0, lr_decay_rate=FLAGS.LEARNING_DECAY_RATE_0,
+                        batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
+        model_op_1, model_lr = model.dp_optimization([model_loss, model_loss_reg_1], gaussian_sanitizer_1, sgd_sigma_holder,
+                        trans_sigma=trans_sigma_holder, opt_vars=top_1_opt_vars, 
+                        learning_rate=FLAGS.LEARNING_RATE_1, lr_decay_steps=FLAGS.LEARNING_DECAY_STEPS_1, lr_decay_rate=FLAGS.LEARNING_DECAY_RATE_1,
+                        batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
+        
         # analysis
-        model_M, model_sens = model.compute_M_from_input_perturbation([model_loss_clean, model_loss_reg], FLAGS.DP_GRAD_CLIPPING_L2NORM, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
+        model_M_1, _ = model.compute_M_from_input_perturbation([model_loss_clean, model_loss_reg_1], FLAGS.DP_GRAD_CLIPPING_L2NORM_1, 
+                        var_list=top_1_opt_vars, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
         model_acc = model.cnn_accuracy
 
 
@@ -402,6 +440,7 @@ def train():
             for train_idx in range(total_train_lot):
             #for train_idx in range(1):
                 terminate = False
+                # top_2_layers
                 lot_feeds = []
                 lot_M = []
                 for _ in range(FLAGS.BATCHES_PER_LOT):
@@ -423,46 +462,43 @@ def train():
                         label_holder: batch_ys,
                         is_training: True
                     }
-                    #import pdb; pdb.set_trace()
-                    #batch_S_min = sess.run(fetches=model_S_min[0], feed_dict=feed_dict)
-                    batch_M = sess.run(fetches=model_M, feed_dict=feed_dict)
-                    #batch_S_min = compute_S_min_from_M(batch_M, FLAGS.IS_MGM_LAYERWISED)/FLAGS.DP_GRAD_CLIPPING_L2NORM
+
+
+                    batch_M_1 = sess.run(fetches=model_M_1, feed_dict=feed_dict)
                     lot_feeds.append(feed_dict)
-                    lot_M.append(batch_M)
+                    lot_M.append(batch_M_1)
 
                     b_idx += 1
                 
-                lot_M = sum(lot_M) / (FLAGS.BATCHES_PER_LOT**2)
-                lot_S_min = compute_S_min_from_M(lot_M, FLAGS.IS_MGM_LAYERWISED)/FLAGS.DP_GRAD_CLIPPING_L2NORM
-                #import pdb; pdb.set_trace()
-                min_S_min = lot_S_min
-                sigma_trans = input_sigma * min_S_min
-                
-                if sigma_trans >= FLAGS.TOTAL_DP_SIGMA:
-                    sgd_sigma = 0.0
-                else: 
-                    sgd_sigma = FLAGS.TOTAL_DP_SIGMA - sigma_trans
-                    sigma_trans = FLAGS.TOTAL_DP_SIGMA
+                min_S_min_1, sgd_sigma_1, sigma_trans_1 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM_1)
+                # for input transofrmation
+                if train_idx % 1 == 0:
+                    print("top_1_layers:")
+                    print("min S_min: ", min_S_min_1)
+                    print("Sigma trans: ", sigma_trans_1)
+                    print("Sigma grads: ", sgd_sigma_1)
+                    print()
+
+                # run op for top_1_layers
                 for feed_dict in lot_feeds:
-                    # DP-SGD
-                    feed_dict[sgd_sigma_holder] = sgd_sigma
-                    feed_dict[trans_sigma_holder] = sigma_trans
-                    sess.run(fetches=model_op, feed_dict=feed_dict)
-                    sess.run(fetches=model_bott_op, feed_dict=feed_dict)
+                    #if train_idx % 5 < 4:
+                    if train_idx % FLAGS.BOTT_TRAIN_FREQ_TOTAL < FLAGS.BOTT_TRAIN_FREQ:
+                        feed_dict[sgd_sigma_holder] = FLAGS.TOTAL_DP_SIGMA
+                        sess.run(fetches=model_bott_op, feed_dict=feed_dict)
+                    
+                    feed_dict[sgd_sigma_holder] = sgd_sigma_1
+                    feed_dict[trans_sigma_holder] = sigma_trans_1
+                    sess.run(fetches=model_op_1, feed_dict=feed_dict)
 
                 itr_count += 1
                 if itr_count > FLAGS.MAX_ITERATIONS:
                     terminate = True
                
-                # for input transofrmation
-                if train_idx % 1 == 0:
-                    print("min S_min: ", min_S_min)
-                    print("Sigma trans: ", sigma_trans)
-                    print("Sigma grads: ", sgd_sigma)
+                
                 
                 # optimization
-                fetches = [model_loss, model_loss_reg, model_acc, model_lr]
-                loss, reg, acc, lr = sess.run(fetches=fetches, feed_dict=feed_dict)
+                fetches = [model_loss, model_loss_bott, model_loss_reg_bott, model_loss_reg_1, model_acc, model_lr]
+                loss, loss_bott, reg0, reg1, acc, lr = sess.run(fetches=fetches, feed_dict=feed_dict)
                 #import pdb; pdb.set_trace()
                 spent_eps_delta, selected_moment_orders = priv_accountant.get_privacy_spent(sess, target_eps=[total_dp_epsilon])
                 spent_eps_delta = spent_eps_delta[0]
@@ -474,10 +510,10 @@ def train():
                 if train_idx % FLAGS.EVAL_TRAIN_FREQUENCY == (FLAGS.EVAL_TRAIN_FREQUENCY - 1):
                     print("Epoch: {}".format(epoch))
                     print("Iteration: {}".format(itr_count))
-                    print("Sigma used:{}".format(sigma_trans))
-                    print("SGD Sigma: {}".format(sgd_sigma))
+                    print("Sigma used 1:{}".format(sigma_trans_1))
+                    print("SGD Sigma 1: {}".format(sgd_sigma_1))
                     print("Learning rate: {}".format(lr))
-                    print("Loss: {:.4f}, Reg loss: {:.4f}, Accuracy: {:.4f}".format(loss, reg, acc))
+                    print("Loss: {:.4f}, Loss Bott: {:.4f}, Reg loss bott: {:.4f}, Reg loss 1: {:.4f}, Accuracy: {:.4f}".format(loss, loss_bott, reg0, reg1, acc))
                     print("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}".format(
                         spent_eps_delta.spent_eps, spent_eps_delta.spent_delta, total_dp_sigma, input_sigma))
                     print()
@@ -486,10 +522,10 @@ def train():
                     with open(FLAGS.TRAIN_LOG_FILENAME, "a+") as file: 
                         file.write("Epoch: {}\n".format(epoch))
                         file.write("Iteration: {}\n".format(itr_count))
-                        file.write("Sigma used: {}\n".format(sigma_trans))
-                        file.write("SGD Sigma: {}\n".format(sgd_sigma))
+                        file.write("Sigma used 1: {}\n".format(sigma_trans_1))
+                        file.write("SGD Sigma 1: {}\n".format(sgd_sigma_1))
                         file.write("Learning rate: {}\n".format(lr))
-                        file.write("Loss: {:.4f}, Reg loss: {:.4f},  Accuracy: {:.4f}\n".format(loss, reg, acc))
+                        file.write("Loss: {:.4f}, Loss Bott: {:.4f}, Reg loss bott: {:.4f}, Reg loss 1: {:.4f}, Accuracy: {:.4f}\n".format(loss, loss_bott, reg0, reg1, acc))
                         file.write("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}\n".format(
                             spent_eps_delta.spent_eps, spent_eps_delta.spent_delta, total_dp_sigma, input_sigma))
                         file.write("\n")
