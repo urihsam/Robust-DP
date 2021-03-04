@@ -1,4 +1,4 @@
-import nn.robust_dp_cifar10_transfer_v3 as model_cifar10
+import nn.robust_dp_cifar10_transfer_v4 as model_cifar10
 import os, math
 from PIL import Image
 from dependency import *
@@ -30,6 +30,80 @@ def main(arvg=None):
     else:
         test()
 
+def pub_test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=None):
+    # model training   
+    total_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+    top_1_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, model.opt_scope_1.name)
+    bott_opt_vars = []
+    
+    for v_ in total_opt_vars:
+        if v_ not in top_1_opt_vars and "logits" not in v_.name:
+            bott_opt_vars.append(v_)
+    total_opt_vars =  top_1_opt_vars + bott_opt_vars
+
+    
+    model_loss_pub = model.loss_pub(FLAGS.BETA)
+    
+    model_acc_pub = model.cnn_pub_accuracy
+    
+    full_data = False
+    
+    batch_size = FLAGS.BATCH_SIZE
+    if total_batch is None:
+        if is_valid:
+            total_batch = int(data.pub_valid_size/batch_size)
+        else:
+            total_batch = int(data.test_size/batch_size)
+        full_data = True
+    else: total_batch = total_batch
+
+    acc = 0 
+    loss = 0
+
+    if is_valid:
+        data.shuffle_valid()
+        x_ = data.x_valid_pub
+        y_ = data.y_valid_pub
+        
+    else:
+        data.shuffle_test()
+        x_ = data.x_test
+        y_ = data.y_test
+    
+    for b_idx in range(total_batch):
+        
+        #batch_xs = keras_resnet_preprocess(x_[b_idx*batch_size:(b_idx+1)*batch_size])
+        batch_xs = keras_resnet_preprocess(x_[b_idx*batch_size:(b_idx+1)*batch_size])
+        batch_ys = y_[b_idx*batch_size:(b_idx+1)*batch_size]
+
+        feed_dict = {
+            graph_dict["data_holder"]: batch_xs,
+            graph_dict["label_holder"]: batch_ys,
+            graph_dict["is_training"]: False
+        }
+        
+        fetches = [model_loss_pub, model_acc_pub]
+                    
+        batch_loss, batch_acc = sess.run(fetches=fetches, feed_dict=feed_dict)
+        
+        acc += batch_acc
+        loss += batch_loss
+        
+    acc /= total_batch
+    loss /= total_batch
+
+    # Print info
+    print("Loss Pub: {:.4f}, Accuracy Pub: {:.4f}".format(loss, acc))
+    with open(log_file, "a+") as file: 
+        if full_data:
+            file.write("FULL DATA\n")
+        file.write("Loss Pub: {:.4f}, Accuracy Pub: {:.4f}\n".format(loss, acc))
+        file.write("---------------------------------------------------\n")
+    
+    res_dict = {"acc": acc, 
+                "loss": loss
+                }
+    return res_dict
 
 def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=None):
     # model training   
@@ -59,7 +133,7 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
     batch_size = FLAGS.BATCH_SIZE
     if total_batch is None:
         if is_valid:
-            total_batch = int(data.valid_size/batch_size)
+            total_batch = int(data.priv_valid_size/batch_size)
         else:
             total_batch = int(data.test_size/batch_size)
         full_data = True
@@ -76,8 +150,8 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
 
     if is_valid:
         data.shuffle_valid()
-        x_ = data.x_valid
-        y_ = data.y_valid
+        x_ = data.x_valid_priv
+        y_ = data.y_valid_priv
         
     else:
         data.shuffle_test()
@@ -108,7 +182,7 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
                     model_loss_reg_highway, model_loss_reg_bott, model_loss_reg_1, model_acc]
                     
         feed_dict[graph_dict["sgd_sigma_holder"]] = 0.0
-        feed_dict[graph_dict["trans_sigma_holder"]] = 0.0
+        feed_dict[graph_dict["act_sigma_holder"]] = 0.0
 
         batch_loss, batch_loss_hw, batch_loss_bott, batch_reg_hw, batch_reg0, batch_reg1, batch_acc = sess.run(fetches=fetches, feed_dict=feed_dict)
         
@@ -379,15 +453,11 @@ def train():
         noise_holder = tf.placeholder(tf.float32, [batch_size, 28, 28, 32])
         label_holder = tf.placeholder(tf.float32, [batch_size, FLAGS.NUM_CLASSES])
         sgd_sigma_holder = tf.placeholder(tf.float32, ())
-        trans_sigma_holder = tf.placeholder(tf.float32, ())
+        act_sigma_holder = tf.placeholder(tf.float32, ())
         is_training = tf.placeholder(tf.bool, ())
         # model
         model = model_cifar10.RDPCNN(data=data_holder, label=label_holder, input_sigma=input_sigma, is_training=is_training, noised_pretrain=noised_pretrain_holder, noise=noise_holder)
         priv_accountant = accountant.GaussianMomentsAccountant(data.train_size)
-        gaussian_sanitizer_bott = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
-            [FLAGS.DP_GRAD_CLIPPING_L2NORM_BOTT, True])
-        gaussian_sanitizer_1 = sanitizer.AmortizedGaussianSanitizer(priv_accountant,
-            [FLAGS.DP_GRAD_CLIPPING_L2NORM_1, True])
 
         # model training   
         total_opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
@@ -403,12 +473,15 @@ def train():
         # loss
         model_loss_highway = model.loss_highway(FLAGS.BETA_HW)
         model_loss_clean = model.loss_clean(FLAGS.BETA)
+        model_loss_pub = model.loss_pub(FLAGS.BETA)
         model_loss = model.loss(FLAGS.BETA)
         model_loss_bott = model.loss_bott(FLAGS.BETA_BOTT)
 
+        
         model_loss_reg_highway = model.loss_reg(FLAGS.REG_SCALE_HW, total_opt_vars)
         model_loss_reg_1 = model.loss_reg(FLAGS.REG_SCALE, top_1_opt_vars)
         model_loss_reg_bott = model.loss_reg(FLAGS.REG_SCALE_BOTT, bott_opt_vars)
+        
         # training
         '''
         model_highway_op, model_lr_highway = model.dp_optimization([model_loss_highway, model_loss_reg_highway], gaussian_sanitizer_bott, sgd_sigma_holder, 
@@ -421,15 +494,20 @@ def train():
                         learning_rate=FLAGS.LEARNING_RATE_0, lr_decay_steps=FLAGS.LEARNING_DECAY_STEPS_0, lr_decay_rate=FLAGS.LEARNING_DECAY_RATE_0,
                         batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
         '''
-        model_op_1, model_lr = model.dp_optimization(model_loss, gaussian_sanitizer_1, sgd_sigma_holder,
-                        trans_sigma=trans_sigma_holder, opt_vars=top_1_opt_vars, 
+        model_op_pub, model_lot_ops_pub, _, model_lr_pub = model.optimization(model_loss_pub, opt_vars=total_opt_vars, accum_iters=FLAGS.BATCHES_PER_LOT)
+        model_zero_op_pub, model_accum_op_pub, model_avg_op_pub = model_lot_ops_pub
+
+        model_op_1, model_lot_ops_1, _, model_lr = model.dp_optimization(model_loss, priv_accountant, sgd_sigma_holder,
+                        act_sigma=act_sigma_holder, opt_vars=top_1_opt_vars, 
                         learning_rate=FLAGS.LEARNING_RATE_1, lr_decay_steps=FLAGS.LEARNING_DECAY_STEPS_1, lr_decay_rate=FLAGS.LEARNING_DECAY_RATE_1,
-                        batched_per_lot=FLAGS.BATCHES_PER_LOT, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
+                        batched_per_lot=FLAGS.BATCHES_PER_LOT)
+        model_zero_op_1, model_accum_op_1, model_avg_op_1 = model_lot_ops_1
         
         # analysis
         model_M_1, _ = model.compute_M_from_input_perturbation(model_loss_clean, FLAGS.DP_GRAD_CLIPPING_L2NORM_1, 
-                        var_list=top_1_opt_vars, is_layerwised=FLAGS.IS_MGM_LAYERWISED)
+                        var_list=top_1_opt_vars, is_layerwised=False)
         model_acc = model.cnn_accuracy
+        model_acc_pub = model.cnn_pub_accuracy
 
 
         graph_dict = {}
@@ -438,7 +516,7 @@ def train():
         graph_dict["noise_holder"] = noise_holder
         graph_dict["label_holder"] = label_holder
         graph_dict["sgd_sigma_holder"] = sgd_sigma_holder
-        graph_dict["trans_sigma_holder"] = trans_sigma_holder
+        graph_dict["act_sigma_holder"] = act_sigma_holder
         graph_dict["is_training"] = is_training
 
     config = tf.ConfigProto()
@@ -453,13 +531,96 @@ def train():
             model.tf_load(sess, name=FLAGS.CNN_CKPT_RESTORE_NAME)
         
         if FLAGS.local:
+            total_train_batch = 2
+            total_valid_batch = 2
+        else:
+            total_train_batch = int(data.pub_train_size/batch_size/FLAGS.BATCHES_PER_LOT)
+            total_valid_batch = None       
+
+        if FLAGS.load_pub_model:
+            print("Load Pub model")
+            model.tf_save(sess, name=FLAGS.PUB_CNN_CKPT_RESTORE_NAME)
+        else:      
+            print("Pub Training...")
+            itr_count = 0
+            itr_start_time = time.time()
+            for epoch in range(FLAGS.NUM_PUB_EPOCHS):
+                ep_start_time = time.time()
+
+                # shuffle
+                data.shuffle_pub_train()
+                b_idx = 0
+
+                for train_idx in range(total_train_batch):
+                    lot_feeds = []
+                    lot_M = []
+                    sess.run(model_zero_op_pub)
+                    for _ in range(FLAGS.BATCHES_PER_LOT):
+                        #batch_xs = keras_resnet_preprocess(data.x_train[b_idx*batch_size:(b_idx+1)*batch_size])
+                        batch_xs = keras_resnet_preprocess(data.x_train_pub[b_idx*batch_size:(b_idx+1)*batch_size])
+                        batch_ys = data.y_train_pub[b_idx*batch_size:(b_idx+1)*batch_size]
+
+                        feed_dict = {
+                            data_holder: batch_xs,
+                            label_holder: batch_ys,
+                            is_training: True
+                        }
+                        sess.run(fetches=model_accum_op_pub, feed_dict=feed_dict)
+                    sess.run(model_avg_op_pub)
+                    sess.run(model_op_pub, feed_dict=feed_dict)
+
+                    itr_count += 1
+                    b_idx += 1
+
+                    # Print info
+                    if train_idx % FLAGS.EVAL_PUB_TRAIN_FREQUENCY == (FLAGS.EVAL_PUB_TRAIN_FREQUENCY - 1):
+                        # optimization
+                        fetches = [model_loss_pub, model_acc_pub, model_lr_pub]
+                        loss_pub, acc_pub, lr_pub = sess.run(fetches=fetches, feed_dict=feed_dict)
+                        
+                        print("Epoch: {}".format(epoch))
+                        print("Iteration: {}".format(itr_count))
+                        print("Learning rate: {}".format(lr_pub))
+                        print("Loss Pub: {:.4f}, Accuracy Pub: {:.4f}".format(loss_pub, acc_pub))
+                        print()
+                        #model.tf_save(sess) # save checkpoint
+
+                        with open(FLAGS.PUB_TRAIN_LOG_FILENAME, "a+") as file: 
+                            file.write("Epoch: {}\n".format(epoch))
+                            file.write("Iteration: {}\n".format(itr_count))
+                            file.write("Learning rate: {}\n".format(lr_pub))
+                            file.write("Loss Pub: {:.4f}, Accuracy Pub: {:.4f}\n".format(loss_pub, acc_pub))
+                            file.write("\n")
+                
+                    if itr_count % FLAGS.EVAL_PUB_VALID_FREQUENCY == 0:
+                        #if train_idx >= 0:
+                        end_time = time.time()
+                        print('{} iterations completed with time {:.2f} s'.format(itr_count, end_time-itr_start_time))
+                        # validation
+                        print("\n******************************************************************")
+                        print("Epoch {} Validation".format(epoch))
+                        valid_dict = pub_test_info(sess, model, True, graph_dict, None, FLAGS.PUB_VALID_LOG_FILENAME, total_batch=total_valid_batch)
+
+                end_time = time.time()
+                print('Eopch {} completed with time {:.2f} s'.format(epoch, end_time-ep_start_time)) 
+                print("\n******************************************************************")  
+                print("Epoch {} Validation".format(epoch))
+                valid_dict = pub_test_info(sess, model, True, graph_dict, None, FLAGS.PUB_VALID_LOG_FILENAME, total_batch=None)
+                ckpt_name='robust_dp_cnn.pub.epoch{}.vloss{:.6f}.vacc{:.6f}.ckpt'.format(
+                        epoch,
+                        valid_dict["loss"],
+                        valid_dict["acc"]
+                        )
+                model.tf_save(sess, name=ckpt_name) # extra store
+
+        if FLAGS.local:
             total_train_lot = 2
             total_valid_lot = 2
         else:
-            total_train_lot = int(data.train_size/batch_size/FLAGS.BATCHES_PER_LOT)
-            total_valid_lot = None        
-        
-        print("Training...")
+            total_train_lot = int(data.priv_train_size/batch_size/FLAGS.BATCHES_PER_LOT)
+            total_valid_lot = None  
+
+        print("DP Training...")
         itr_count = 0
         itr_start_time = time.time()
         for epoch in range(FLAGS.NUM_EPOCHS):
@@ -481,8 +642,8 @@ def train():
                     lot_M = []
                     for _ in range(FLAGS.BATCHES_PER_LOT):
                         #batch_xs = keras_resnet_preprocess(data.x_train[b_idx*batch_size:(b_idx+1)*batch_size])
-                        batch_xs = keras_resnet_preprocess(data.x_train[b_idx*batch_size:(b_idx+1)*batch_size])
-                        batch_ys = data.y_train[b_idx*batch_size:(b_idx+1)*batch_size]
+                        batch_xs = keras_resnet_preprocess(data.x_train_priv[b_idx*batch_size:(b_idx+1)*batch_size])
+                        batch_ys = data.y_train_priv[b_idx*batch_size:(b_idx+1)*batch_size]
 
                         feed_dict = {
                             data_holder: batch_xs,
@@ -505,12 +666,12 @@ def train():
 
                         b_idx += 1
                     
-                    min_S_min_1, sgd_sigma_1, sigma_trans_1 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM_1)
+                    min_S_min_1, sgd_sigma_1, act_sigma_1 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM_1)
                     # for input transofrmation
                     if train_idx % 1 == 0:
                         print("top_1_layers:")
                         print("min S_min: ", min_S_min_1)
-                        print("Sigma trans: ", sigma_trans_1)
+                        print("Sigma trans: ", act_sigma_1)
                         print("Sigma grads: ", sgd_sigma_1)
                         print()
                     '''
@@ -521,17 +682,17 @@ def train():
                         
                     '''
                     # run op for top_1_layers
+                    sess.run(model_zero_op_1)
                     for feed_dict in lot_feeds:
-                        #if train_idx % 5 < 4:
-                        
-                        if train_idx % FLAGS.TOP_1_TRAIN_FREQ_TOTAL < FLAGS.TOP_1_TRAIN_FREQ:
-                            feed_dict[sgd_sigma_holder] = sgd_sigma_1
-                            feed_dict[trans_sigma_holder] = sigma_trans_1
-                            sess.run(fetches=model_op_1, feed_dict=feed_dict)
+                        feed_dict[sgd_sigma_holder] = sgd_sigma_1
+                        feed_dict[act_sigma_holder] = act_sigma_1
+                        sess.run(fetches=model_accum_op_1, feed_dict=feed_dict)
+                    sess.run(model_avg_op_1)
+                    sess.run(model_op_1, feed_dict=feed_dict)
                 else:
                     '''
                     sgd_sigma_1 = FLAGS.TOTAL_DP_SIGMA
-                    sigma_trans_1 = 0.0
+                    act_sigma_1 = 0.0
                     for _ in range(FLAGS.BATCHES_PER_LOT):
                         #batch_xs = keras_resnet_preprocess(data.x_train[b_idx*batch_size:(b_idx+1)*batch_size])
                         batch_xs = keras_resnet_preprocess(data.x_train[b_idx*batch_size:(b_idx+1)*batch_size])
@@ -561,8 +722,6 @@ def train():
                     terminate = True
                
                 
-                
-                
                 #import pdb; pdb.set_trace()
                 spent_eps_delta, selected_moment_orders = priv_accountant.get_privacy_spent(sess, target_eps=[total_dp_epsilon])
                 spent_eps_delta = spent_eps_delta[0]
@@ -580,7 +739,7 @@ def train():
                     
                     print("Epoch: {}".format(epoch))
                     print("Iteration: {}".format(itr_count))
-                    print("Sigma used 1:{}".format(sigma_trans_1))
+                    print("Sigma used 1:{}".format(act_sigma_1))
                     print("SGD Sigma 1: {}".format(sgd_sigma_1))
                     #print("Learning rate: {}, Learning rate bott: {}, Learning rate highway: {}".format(lr, lr_bott, lr_highway))
                     print("Learning rate: {}".format(lr))
@@ -594,7 +753,7 @@ def train():
                     with open(FLAGS.TRAIN_LOG_FILENAME, "a+") as file: 
                         file.write("Epoch: {}\n".format(epoch))
                         file.write("Iteration: {}\n".format(itr_count))
-                        file.write("Sigma used 1: {}\n".format(sigma_trans_1))
+                        file.write("Sigma used 1: {}\n".format(act_sigma_1))
                         file.write("SGD Sigma 1: {}\n".format(sgd_sigma_1))
                         #file.write("Learning rate: {}, Learning rate bott: {}, Learning rate highway: {}\n".format(lr, lr_bott, lr_highway))
                         file.write("Learning rate: {}\n".format(lr))
@@ -637,7 +796,7 @@ def train():
                 
                 
             end_time = time.time()
-            print('Eopch {} completed with time {:.2f} s'.format(epoch+1, end_time-ep_start_time))
+            print('Eopch {} completed with time {:.2f} s'.format(epoch, end_time-ep_start_time))
             # validation
             print("\n******************************************************************")
             print("Epoch {} Validation".format(epoch))

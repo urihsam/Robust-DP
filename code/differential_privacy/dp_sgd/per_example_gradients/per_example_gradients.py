@@ -316,6 +316,40 @@ pxg_registry.Register("Add", AddPXG)
 
 
 ##/**PT add**/
+class AddV2PXG(object):
+  """Per-example gradient rule for Add op.
+
+  Same interface as MatMulPXG.
+  """
+
+  def __init__(self, op,
+               colocate_gradients_with_ops=False,
+               gate_gradients=False):
+
+    assert op.node_def.op == "AddV2"
+    self.op = op
+    self.colocate_gradients_with_ops = colocate_gradients_with_ops
+    self.gate_gradients = gate_gradients
+
+  def __call__(self, x, z_grads):
+    idx = list(self.op.inputs).index(x)
+    # Make sure that `op` was actually applied to `x`
+    assert idx != -1
+    assert len(z_grads) == len(self.op.outputs)
+    # The following assert may be removed when we are ready to use this
+    # for general purpose code.
+    # This assert is only expected to hold in the contex of our preliminary
+    # MNIST experiments.
+    assert idx == 1 # We expect biases to be arg 1
+    # We don't expect anyone to per-example differentiate with respect
+    # to anything other than the biases.
+    x, _ = self.op.inputs
+    z_grads, = z_grads
+    return z_grads
+
+
+pxg_registry.Register("AddV2", AddV2PXG)
+
 class BiasAddPXG(object):
   """Per-example gradient rule for Add op.
 

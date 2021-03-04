@@ -10,6 +10,7 @@ def set_flags():
     flags.DEFINE_string("CNN_PATH", "./models/CIFAR10/CNN", "Path of cifar10 cnn")
     flags.DEFINE_string("PRETRAINED_CNN_PATH", "./models/CIFAR10/PRE/CNN", "Path of cifar10 cnn")
     flags.DEFINE_string("CNN_CKPT_RESTORE_NAME", "robust_dp_cnn.ckpt", "Path of cifar10 cnn")
+    flags.DEFINE_string("PUB_CNN_CKPT_RESTORE_NAME", "robust_pub_cnn.ckpt", "Path of cifar10 cnn")
     flags.DEFINE_string("PRETRAINED_CNN_CKPT_RESTORE_NAME", "robust_dp_cnn.ckpt", "Path of cifar10 cnn")
     flags.DEFINE_string("TRAIN_LOG_PATH", "./graphs/train", "Path of log for training")
     flags.DEFINE_string("VALID_LOG_PATH", "./graphs/valid", "Path of log for validation")
@@ -17,6 +18,9 @@ def set_flags():
     flags.DEFINE_string("TRAIN_LOG_FILENAME", "cifar10_train_log.txt", "Path of log for training")
     flags.DEFINE_string("VALID_LOG_FILENAME", "cifar10_valid_log.txt", "Path of log for validation")
     flags.DEFINE_string("TEST_LOG_FILENAME", "cifar10_test_log.txt", "Path of log for testing")
+    flags.DEFINE_string("PUB_TRAIN_LOG_FILENAME", "cifar10_pub_train_log.txt", "Path of log for training")
+    flags.DEFINE_string("PUB_VALID_LOG_FILENAME", "cifar10_pub_valid_log.txt", "Path of log for validation")
+    flags.DEFINE_string("PUB_TEST_LOG_FILENAME", "cifar10_pub_test_log.txt", "Path of log for testing")
     flags.DEFINE_string("FINETUNE_TRAIN_LOG_FILENAME", "cifar10_fine_train_log.txt", "Path of log for training")
     flags.DEFINE_string("FINETUNE_VALID_LOG_FILENAME", "cifar10_fine_valid_log.txt", "Path of log for validation")
     flags.DEFINE_string("FINETUNE_TEST_LOG_FILENAME", "cifar10_fine_test_log.txt", "Path of log for testing")
@@ -33,7 +37,13 @@ def set_flags():
     # Training params
     flags.DEFINE_integer("BOTT_TRAIN_FREQ", 3, "Number of train bott layers freq")
     flags.DEFINE_integer("BOTT_TRAIN_FREQ_TOTAL", 5, "Number of train bott layers total")
+    flags.DEFINE_integer("HIGHWAY_TRAIN_FREQ", 3, "Number of train bott layers freq")
+    flags.DEFINE_integer("HIGHWAY_TRAIN_FREQ_TOTAL", 5, "Number of train bott layers total")
+    flags.DEFINE_integer("TOP_1_TRAIN_FREQ", 3, "Number of train bott layers freq")
+    flags.DEFINE_integer("TOP_1_TRAIN_FREQ_TOTAL", 5, "Number of train bott layers total")
     flags.DEFINE_integer("NUM_EPOCHS", 1, "Number of epochs") # 200
+    flags.DEFINE_integer("NUM_PUB_EPOCHS", 1, "Number of epochs") # 200
+    flags.DEFINE_integer("DPSGD_EPOCHS", -1, "Number of epochs")
     flags.DEFINE_integer("NUM_FINETUNE_EPOCHS", 1, "Number of epochs") # 200
     flags.DEFINE_integer("NUM_ACCUM_ITERS", 2, "Number of accumulation") # 2
     flags.DEFINE_integer("BATCH_SIZE", 128, "Size of training batches")# 128
@@ -42,30 +52,40 @@ def set_flags():
     flags.DEFINE_integer("FINETUNE_BATCHES_PER_LOT", 1, "Number of batches per lot")
     flags.DEFINE_integer("EVAL_TRAIN_FREQUENCY", 1, "Frequency for evaluation") # 25
     flags.DEFINE_integer("EVAL_VALID_FREQUENCY", 1, "Frequency for evaluation") # 25
+    flags.DEFINE_integer("EVAL_PUB_TRAIN_FREQUENCY", 1, "Frequency for evaluation") # 25
+    flags.DEFINE_integer("EVAL_PUB_VALID_FREQUENCY", 1, "Frequency for evaluation") # 25
     flags.DEFINE_integer("EVAL_FINETUNE_TRAIN_FREQUENCY", 1, "Frequency for evaluation") # 25
     flags.DEFINE_integer("EVAL_FINETUNE_VALID_FREQUENCY", 1, "Frequency for evaluation") # 25
     flags.DEFINE_bool("TRAIN_BEFORE_FINETUNE", True, "Train model before finetune")
     flags.DEFINE_bool("load_model", False, "Load model from the last training result or not")
+    flags.DEFINE_bool("load_pub_model", False, "Load model from the last training result or not")
     flags.DEFINE_bool("load_pretrained", False, "Load model from the last training result or not")
     flags.DEFINE_bool("early_stopping", False, "Use early stopping or not")
     flags.DEFINE_integer("EARLY_STOPPING_THRESHOLD", 10, "Early stopping threshold")
     # Loss param
     flags.DEFINE_float("BETA", 100.0, "Coefficient for loss")
+    flags.DEFINE_float("BETA_HW", 100.0, "Coefficient for loss")
     flags.DEFINE_float("BETA_BOTT", 100.0, "Coefficient for loss")
     flags.DEFINE_float("FINETUNE_BETA", 100.0, "Coefficient for loss")
     flags.DEFINE_float("REG_SCALE", 1.0, "Coeff for regularization")
+    flags.DEFINE_float("REG_SCALE_HW", 1.0, "Coeff for regularization")
     flags.DEFINE_float("REG_SCALE_BOTT", 1.0, "Coeff for regularization")
     # Optimization params
     flags.DEFINE_string("OPT_TYPE", "ADAM", "The type of optimization") # ADAM, MOME, NEST
     flags.DEFINE_float("BATCH_MOME", 0.99, "Momentum for the moving average")
     flags.DEFINE_float("BATCH_EPSILON", 0.001, "Small float added to variance to avoid dividing by zero")
     flags.DEFINE_float("LEARNING_RATE", 1e-4, "Learning rate of optimization")
+    flags.DEFINE_float("LEARNING_RATE_HW", 1e-4, "Learning rate of optimization")
     flags.DEFINE_float("LEARNING_RATE_0", 1e-4, "Learning rate of optimization")
     flags.DEFINE_float("LEARNING_RATE_1", 1e-4, "Learning rate of optimization")
     flags.DEFINE_float("LEARNING_RATE_2", 1e-4, "Learning rate of optimization")
+    flags.DEFINE_float("LEARNING_DECAY_RATE", 0.99, "Decay rate of learning rate")
+    flags.DEFINE_float("LEARNING_DECAY_RATE_HW", 0.99, "Decay rate of learning rate")
     flags.DEFINE_float("LEARNING_DECAY_RATE_0", 0.99, "Decay rate of learning rate")
     flags.DEFINE_float("LEARNING_DECAY_RATE_1", 0.99, "Decay rate of learning rate")
     flags.DEFINE_float("LEARNING_DECAY_RATE_2", 0.99, "Decay rate of learning rate")
+    flags.DEFINE_integer("LEARNING_DECAY_STEPS", int(2.5*1e3), "Decay steps of learning rate")
+    flags.DEFINE_integer("LEARNING_DECAY_STEPS_HW", int(2.5*1e3), "Decay steps of learning rate")
     flags.DEFINE_integer("LEARNING_DECAY_STEPS_0", int(2.5*1e3), "Decay steps of learning rate")
     flags.DEFINE_integer("LEARNING_DECAY_STEPS_1", int(2.5*1e3), "Decay steps of learning rate")
     flags.DEFINE_integer("LEARNING_DECAY_STEPS_2", int(2.5*1e3), "Decay steps of learning rate")
@@ -91,7 +111,7 @@ def set_flags():
     flags.DEFINE_integer("MAX_PARAM_SIZE", 10, "DP gradient clipping in L2 norm")
     flags.DEFINE_integer("ACCOUNT_NUM", 10, "Num of param layers for account")
     flags.DEFINE_integer("DP_ACCOUNTANT_ITERATION", 20, "The Iteration threshold for dp accountant")
-    flags.DEFINE_bool("IS_MGM_LAYERWISED", True, "Whether calculate K norm layerwisedly or not")
+    flags.DEFINE_bool("IS_MGM_LAYERWISED", False, "Whether calculate K norm layerwisedly or not")
     ## perturbation param
     flags.DEFINE_float("INPUT_SIGMA", 1.0, "The sigma of input perturbation")
     flags.DEFINE_float("INPUT_DP_SIGMA_THRESHOLD", 0.6, "The sigma threshold of input perturbation")

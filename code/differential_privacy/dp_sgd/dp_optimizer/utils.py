@@ -232,14 +232,18 @@ def BatchClipByL2norm(t, upper_bound, name=None):
     the clipped tensor.
   """
 
-  assert upper_bound > 0
+  #assert upper_bound > 0
   with tf.name_scope(values=[t, upper_bound], name=name,
                      default_name="batch_clip_by_l2norm") as name:
     saved_shape = tf.shape(t)
     batch_size = tf.slice(saved_shape, [0], [1])
     t2 = tf.reshape(t, tf.concat(axis=0, values=[batch_size, [-1]]))
+    #import pdb; pdb.set_trace()
+    '''
     upper_bound_inv = tf.fill(tf.slice(saved_shape, [0], [1]),
                               tf.constant(1.0/upper_bound))
+    '''
+    upper_bound_inv = 1.0/upper_bound
     # Add a small number to avoid divide by 0
     l2norm_inv = tf.rsqrt(tf.reduce_sum(t2 * t2, [1]) + 0.000001)
     scale = tf.minimum(l2norm_inv, upper_bound_inv) * upper_bound

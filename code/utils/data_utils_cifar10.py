@@ -46,16 +46,35 @@ class dataset(object):
         self.test_size = x_test.shape[0]
 
         import random
+        
         # shuffling
         total_idx = list(range(total_size))
         random.shuffle(total_idx)
+        # train
         train_idx = total_idx[:self.train_size]
         self.x_train = x_train_[train_idx]
         self.y_train = y_train_[train_idx]
         #
+        self.priv_train_size = self.train_size // 2
+        self.pub_train_size = self.train_size - self.priv_train_size
+
+        self.x_train_priv = self.x_train[:self.priv_train_size]
+        self.y_train_priv = self.y_train[:self.priv_train_size]
+        self.x_train_pub = self.x_train[self.priv_train_size:]
+        self.y_train_pub = self.y_train[self.priv_train_size:]
+        
+        # valid
         valid_idx = total_idx[self.train_size:]
         self.x_valid = x_train_[valid_idx]
         self.y_valid = y_train_[valid_idx]
+        #
+        self.priv_valid_size = self.valid_size // 2
+        self.pub_valid_size = self.valid_size - self.priv_valid_size
+
+        self.x_valid_priv = self.x_valid[:self.priv_valid_size]
+        self.y_valid_priv = self.y_valid[:self.priv_valid_size]
+        self.x_valid_pub = self.x_valid[self.priv_valid_size:]
+        self.y_valid_pub = self.y_valid[self.priv_valid_size:]
         #
         test_idx = list(range(self.test_size))
         random.shuffle(test_idx)
@@ -95,5 +114,33 @@ class dataset(object):
         random.shuffle(test_idx)
         self.x_test = self.x_test[test_idx]
         self.y_test = self.y_test[test_idx]
+
+    def shuffle_priv_train(self):
+        # shuffling
+        train_idx = list(range(self.priv_train_size))
+        random.shuffle(train_idx)
+        self.x_train_priv = self.x_train_priv[train_idx]
+        self.y_train_priv = self.y_train_priv[train_idx]
+
+    def shuffle_priv_valid(self):
+        # shuffling
+        valid_idx = list(range(self.priv_valid_size))
+        random.shuffle(valid_idx)
+        self.x_valid_priv = self.x_valid_priv[valid_idx]
+        self.y_valid_priv = self.y_valid_priv[valid_idx]
+
+    def shuffle_pub_train(self):
+        # shuffling
+        train_idx = list(range(self.pub_train_size))
+        random.shuffle(train_idx)
+        self.x_train_pub = self.x_train_pub[train_idx]
+        self.y_train_pub = self.y_train_pub[train_idx]
+
+    def shuffle_pub_valid(self):
+        # shuffling
+        valid_idx = list(range(self.pub_valid_size))
+        random.shuffle(valid_idx)
+        self.x_valid_pub = self.x_valid_pub[valid_idx]
+        self.y_valid_pub = self.y_valid_pub[valid_idx]
 
 

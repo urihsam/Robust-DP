@@ -77,7 +77,7 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
     self._sigma = sigma
     self._act_sigma = accountant_sigma
 
-  def compute_sanitized_gradients(self, loss_list, var_list=None,
+  def compute_sanitized_gradients(self, loss, var_list=None,
                                   add_noise=True):
     """Compute the sanitized gradients.
 
@@ -91,6 +91,7 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
     Raises:
       TypeError: if var_list contains non-variable.
     """
+    '''
     for loss in loss_list:
       self._assert_valid_dtypes([loss])
 
@@ -100,11 +101,31 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
       px_grads_per_loss.append(per_example_gradients.PerExampleGradients(loss, xs))
     per_loss_px_grads = list(zip(*px_grads_per_loss))
     px_grads = []
+    total_size = tf.constant(0.0)
+    px_size = []
     for grads in per_loss_px_grads:
       s_ = tf.constant(0.0)
       for g_ in grads:
         s_ += g_
+      #import pdb; pdb.set_trace()
+      tmp = tf.cast(tf.reduce_prod(s_.get_shape()[1:], 0), tf.float32)
+      px_size.append(tmp)
+      total_size += tmp
+      #import pdb; pdb.set_trace()
       px_grads.append(s_)
+    '''
+    self._assert_valid_dtypes([loss])
+
+    xs = [tf.convert_to_tensor(x) for x in var_list]
+    px_grads = per_example_gradients.PerExampleGradients(loss, xs)
+    
+    px_size = []
+    total_size = tf.constant(0.0)
+    for g_ in px_grads:
+      #import pdb; pdb.set_trace()
+      tmp = tf.cast(tf.reduce_prod(g_.get_shape()[1:], 0), tf.float32)
+      px_size.append(tmp)
+      total_size += tmp
     
     sanitized_grads = []
     idx = 0
@@ -118,19 +139,22 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
         sig = self._sigma
         if self._act_sigma != None:
           act_sig = self._act_sigma
+      clipping_ratio = tf.sqrt(px_size[idx]/total_size)
       
       def no_noise():
         act_op = self._sanitizer.sanitize(
           px_grad, self._eps_delta, sigma=act_sig,
           tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise,
           num_examples=self._batches_per_lot * tf.slice(
-              tf.shape(px_grad), [0], [1]))
+              tf.shape(px_grad), [0], [1]),
+          clipping_ratio=clipping_ratio)
         with tf.control_dependencies([act_op]):
           sanitized_grad = self._sanitizer.sanitize(
             px_grad, self._eps_delta, sigma=sig,
             tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=False,
             num_examples=self._batches_per_lot * tf.slice(
-                tf.shape(px_grad), [0], [1]))
+                tf.shape(px_grad), [0], [1]),
+            clipping_ratio=clipping_ratio)
         
         return sanitized_grad
       
@@ -139,14 +163,17 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
           px_grad, self._eps_delta, sigma=act_sig,
           tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise,
           num_examples=self._batches_per_lot * tf.slice(
-              tf.shape(px_grad), [0], [1]))
+              tf.shape(px_grad), [0], [1]),
+          clipping_ratio=clipping_ratio)
         with tf.control_dependencies([act_op]):
           sanitized_grad = self._sanitizer.sanitize(
             px_grad, self._eps_delta, sigma=sig,
             tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise, no_account=True,
             num_examples=self._batches_per_lot * tf.slice(
-                tf.shape(px_grad), [0], [1]))
+                tf.shape(px_grad), [0], [1]),
+            clipping_ratio=clipping_ratio)
         return sanitized_grad
+      
       if self._act_sigma != None:
         sanitized_grad = tf.cond(tf.equal(sig, tf.constant(0.0)), no_noise, noise)
       else:
@@ -154,7 +181,8 @@ class DPGradientDescentOptimizer(tf.train.GradientDescentOptimizer):
             px_grad, self._eps_delta, sigma=sig,
             tensor_name=tensor_name, is_sigma_scalar=not self._is_sigma_data_dependent, add_noise=add_noise,
             num_examples=self._batches_per_lot * tf.slice(
-                tf.shape(px_grad), [0], [1]))
+                tf.shape(px_grad), [0], [1]),
+            clipping_ratio=clipping_ratio)
       sanitized_grads.append(sanitized_grad)
       idx += 1
     return sanitized_grads

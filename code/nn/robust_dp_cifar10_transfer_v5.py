@@ -3,7 +3,7 @@ import utils.net_element as ne
 from differential_privacy.dp_sgd.dp_optimizer import dp_optimizer_v3 as dp_optimizer
 from tensorflow.python.ops.parallel_for.gradients import jacobian, batch_jacobian
 from differential_privacy.dp_sgd.per_example_gradients import per_example_gradients
-from differential_privacy.dp_sgd.dp_optimizer import utils
+from differential_privacy.dp_sgd.dp_optimizer import utils as dp_utils
 from utils.decorator import *
 from dependency import *
 import tensornets as nets
@@ -15,10 +15,9 @@ class RDPCNN:
     Robust Differential Privacte CNN
     """
 
-    def __init__(self, data, label, input_sigma, is_training, noised_pretrain=None, noise=None):
+    def __init__(self, data, label, input_sigma, is_training, noise=None):
         self.label = label
-        self.data = tf.image.resize(data, [224, 224], method=tf.image.ResizeMethod.BILINEAR)
-        #self.data = data
+        self.data = data
         self.input_sigma = input_sigma
         self.is_training = is_training
         #
@@ -27,22 +26,14 @@ class RDPCNN:
         #with tf.device(gpus[0].name):
 
         # cnn model
-        self.pre_trained = nets.VGG19(self.data, is_training=True, stem=True)
-        
-        #'''
+        data_resized = tf.image.resize(self.data, [224, 224], method=tf.image.ResizeMethod.BILINEAR)
+        self.pre_trained = nets.VGG19(data_resized, is_training=True, stem=True)
         net_list = tf.split(self.pre_trained, 16, axis=-1)
         rows = []
         for i in range(4):
             rows.append(tf.concat(net_list[i*4:(i+1)*4], axis=1))
         net = tf.concat(rows, axis=2)
-        #'''
-        #net = tf.reshape(self.pre_trained, [self.pre_trained.get_shape().as_list()[0], 28, 28, 32])
-
         self.pre_trained_cnn = net
-        #import pdb; pdb.set_trace()
-
-        self.noised_pre = noised_pretrain
-        self.pre = self.noised_pre - noise
 
         
         initializer = tf.contrib.layers.variance_scaling_initializer(factor=1.0, mode='FAN_IN', uniform=True) # conv
@@ -59,11 +50,11 @@ class RDPCNN:
             b_4 = tf.get_variable(initializer=tf.zeros_initializer(), shape=(10), name="b_4")
 
             #import pdb; pdb.set_trace()
-            net = self.noised_pre
+            net = self.pre_trained_cnn
             net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_0, strides=[1, 2, 2, 1], padding="SAME")+ b_0)
             net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_1, strides=[1, 2, 2, 1], padding="SAME")+ b_1)
             net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_2, strides=[1, 2, 2, 1], padding="SAME")+ b_2)
-            net = tf.reshape(net, [self.noised_pre.get_shape().as_list()[0], -1])
+            net = tf.reshape(net, [self.pre_trained_cnn.get_shape().as_list()[0], -1])
             self.cnn_logits = tf.add(tf.matmul(net, w_4), b_4)
             self.cnn_prediction = tf.nn.softmax(self.cnn_logits)
 
@@ -72,19 +63,6 @@ class RDPCNN:
 
         self.opt_scope_1 = opt_scope_1
         #self.opt_scope_2 = opt_scope_2
-        # recon
-        with tf.variable_scope(opt_scope_1, reuse=True): 
-            net = self.pre
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_0, strides=[1, 2, 2, 1], padding="SAME")+ b_0)
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_1, strides=[1, 2, 2, 1], padding="SAME")+ b_1)
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_2, strides=[1, 2, 2, 1], padding="SAME")+ b_2)
-            net = tf.reshape(net, [self.pre.get_shape().as_list()[0], -1])
-
-            self.cnn_clean_logits = tf.add(tf.matmul(net, w_4), b_4)
-            self.cnn_clean_prediction = tf.nn.softmax(self.cnn_clean_logits)
-
-            correct_pred = tf.equal(tf.argmax(self.cnn_clean_prediction, 1), tf.argmax(self.label, 1))
-            self.cnn_clean_accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32), name='accuracy')
 
         # pub
         with tf.variable_scope(opt_scope_1, reuse=True): 
@@ -99,28 +77,6 @@ class RDPCNN:
 
             correct_pred = tf.equal(tf.argmax(self.cnn_pub_prediction, 1), tf.argmax(self.label, 1))
             self.cnn_pub_accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32), name='accuracy')
-
-        # bottom layers
-        with tf.variable_scope(opt_scope_1, reuse=True):
-
-            net = self.pre_trained_cnn + noise
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_0, strides=[1, 2, 2, 1], padding="SAME")+ b_0)
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_1, strides=[1, 2, 2, 1], padding="SAME")+ b_1)
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_2, strides=[1, 2, 2, 1], padding="SAME")+ b_2)
-            net = tf.reshape(net, [self.pre_trained_cnn.get_shape().as_list()[0], -1])
-
-            self.cnn_bott_logits = tf.add(tf.matmul(net, w_4), b_4)
-
-        # bott layers: highway
-        with tf.variable_scope(opt_scope_1, reuse=True):
-
-            net = self.pre_trained_cnn + noise
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_0, strides=[1, 2, 2, 1], padding="SAME")+ b_0)
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_1, strides=[1, 2, 2, 1], padding="SAME")+ b_1)
-            net = tf.nn.leaky_relu(tf.nn.conv2d(net, w_2, strides=[1, 2, 2, 1], padding="SAME")+ b_2)
-            net = tf.reshape(net, [self.noised_pre.get_shape().as_list()[0], -1])
-
-            self.cnn_highway_logits = tf.add(tf.matmul(net, w_4), b_4)
 
 
     def noise_layer(self, data, sigma):
@@ -145,30 +101,10 @@ class RDPCNN:
         tf.summary.scalar("Total_loss", loss)
         return loss
 
-
-    @lazy_method
-    def loss_clean(self, beta):
-        loss = beta * tf.losses.softmax_cross_entropy(self.label, self.cnn_clean_logits)
-        tf.summary.scalar("Total_loss_clean", loss)
-        return loss
-
-
     @lazy_method
     def loss_pub(self, beta):
         loss = beta * tf.losses.softmax_cross_entropy(self.label, self.cnn_pub_logits)
         tf.summary.scalar("Total_loss_pub", loss)
-        return loss
-
-    @lazy_method
-    def loss_bott(self, beta):
-        loss = beta * tf.losses.softmax_cross_entropy(self.label, self.cnn_bott_logits)
-        tf.summary.scalar("Total_loss_bott", loss)
-        return loss
-
-    @lazy_method
-    def loss_highway(self, beta):
-        loss = beta * tf.losses.softmax_cross_entropy(self.label, self.cnn_highway_logits)
-        tf.summary.scalar("Total_loss_highway", loss)
         return loss
 
 
@@ -185,7 +121,8 @@ class RDPCNN:
     @lazy_method_no_scope
     def compute_M_from_input_perturbation(self, loss, l2norm_bound, var_list=None, is_layerwised=False, scope="DP_S_MIN"):
         with tf.variable_scope(scope):
-            ex = self.noised_pre
+            #ex = self.noised_pre
+            ex = self.data
             if var_list == None:
                 var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
 
@@ -215,7 +152,7 @@ class RDPCNN:
                 for px_grad, v in zip(px_grads, var_list):
                     px_grad_vec = tf.reshape(px_grad, [tf.shape(px_grad)[0], -1]) # [batch_size, vec_param]
                     # Clipping
-                    #px_grad_vec = utils.BatchClipByL2norm(px_grad_vec, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+                    #px_grad_vec = dp_utils.BatchClipByL2norm(px_grad_vec, FLAGS.DP_GRAD_CLIPPING_L2NORM)
 
                     px_pp_grad = batch_jacobian(px_grad_vec, ex, use_pfor=False, parallel_iterations=px_grad_vec.get_shape().as_list()[0]*px_grad_vec.get_shape().as_list()[1]) # [b, vec_param, ex_shape]
                     px_pp_jac = tf.reshape(px_pp_grad, [px_pp_grad.get_shape().as_list()[0], px_pp_grad.get_shape().as_list()[1],-1]) #[b, vec_param, ex_size]
@@ -233,7 +170,7 @@ class RDPCNN:
                 px_grad_vec_list = [tf.reshape(px_grad, [tf.shape(px_grad)[0], -1]) for px_grad in px_grads] # [batch_size, vec_param * L]
                 px_grad_vec = tf.concat(px_grad_vec_list, axis=1) # [batch_size, vec_param]
                 # Clipping
-                #px_grad_vec = utils.BatchClipByL2norm(px_grad_vec, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+                #px_grad_vec = dp_utils.BatchClipByL2norm(px_grad_vec, FLAGS.DP_GRAD_CLIPPING_L2NORM)
                 px_pp_grad = batch_jacobian(px_grad_vec, ex, use_pfor=False, parallel_iterations=px_grad_vec.get_shape().as_list()[0]*px_grad_vec.get_shape().as_list()[1]) # [b, vec_param, ex_shape]
                 #px_pp_grad2 = batch_jacobian(px_grad_vec, self.data, use_pfor=False, parallel_iterations=px_grad_vec.get_shape().as_list()[0]*px_grad_vec.get_shape().as_list()[1]) # [b, vec_param, ex_shape]
                 px_pp_jac = tf.reshape(px_pp_grad, [px_pp_grad.get_shape().as_list()[0], px_pp_grad.get_shape().as_list()[1],-1]) #[b, vec_param, ex_size]
@@ -252,9 +189,9 @@ class RDPCNN:
     
 
     @lazy_method_no_scope
-    def dp_optimization(self, loss, sanitizer, dp_sigma, trans_sigma=None, opt_vars=None, batched_per_lot=1, 
+    def dp_optimization(self, loss, priv_accountant, dp_sigma, act_sigma=None, opt_vars=None, batched_per_lot=1, 
                         learning_rate=None, lr_decay_steps=None, lr_decay_rate=None, 
-                        is_sigma_data_dependent=False, is_layerwised=False, scope="DP_OPT"):
+                        px_clipping_norm=1.0, scope="DP_OPT"):
         with tf.variable_scope(scope):
             """
             decayed_learning_rate = learning_rate *
@@ -279,30 +216,87 @@ class RDPCNN:
             if opt_vars == None:
                 opt_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
 
+            momentum = 0.9
+            """optimizer = tf.train.MomentumOptimizer(learning_rate, momentum, use_nesterov=True).minimize(
+                loss, var_list=opt_vars)"""
+            if FLAGS.OPT_TYPE == "NEST":
+                optimizer = tf.train.MomentumOptimizer(learning_rate, momentum, use_nesterov=True)
+            elif FLAGS.OPT_TYPE == "MOME":
+                optimizer = tf.train.MomentumOptimizer(learning_rate, momentum, use_nesterov=False)
+            elif FLAGS.OPT_TYPE == "ADAM":
+                optimizer = tf.train.AdamOptimizer(learning_rate)
 
-            # dp opt
-            optimizer = dp_optimizer.DPGradientDescentOptimizer(
-                learning_rate,
-                [None, None],
-                sanitizer,
-                sigma=dp_sigma,
-                accountant_sigma=trans_sigma,
-                batches_per_lot=batched_per_lot,
-                is_sigma_layerwised=is_layerwised,
-                is_sigma_data_dependent=is_sigma_data_dependent)
+            #dp opt
+            # px grads
+            xs = [tf.convert_to_tensor(x) for x in opt_vars]
+            px_grads = per_example_gradients.PerExampleGradients(loss, xs)
+            #
+            # act_sigma: input perturb is transformed into grad perturb, if transformed perturb is larger than grad perturb, 
+            # then act sigma is transformed perturb and dp_sigma is 0, else act sigma is grad perturb, but dp_sigma is grad_perturb-act_sigma
+            # DP accounting
+            batch_size = px_grads[0].get_shape().as_list()[0]
+            lot_size = batch_size * batched_per_lot
+            act_sigma_64 = tf.cast(act_sigma, tf.float64)
+            privacy_accum_op = priv_accountant.accumulate_privacy_spending([None, None], act_sigma_64, lot_size)
+            
+            # clipping
+            px_grad_vec_list = [tf.reshape(px_grad, [tf.shape(px_grad)[0], -1]) for px_grad in px_grads] # [batch_size, vec_param * L]
+            px_grad_vec = tf.concat(px_grad_vec_list, axis=1) # [batch_size, vec_param]
+            # clipping
+            clipping_inv = 1.0/px_clipping_norm
+            # Add a small number to avoid divide by 0
+            l2norm_inv = tf.rsqrt(tf.reduce_sum(px_grad_vec * px_grad_vec, [1]) + 0.000001)
+            scale = tf.minimum(l2norm_inv, clipping_inv) * px_clipping_norm
+            
+            clipped_px_grads = []
+            for px_grad in px_grads:
+                shape = px_grad.get_shape().as_list()
+                px_grad_ = tf.reshape(px_grad, [shape[0], -1])
+                scaled = tf.matmul(tf.diag(scale), px_grad_)
+                clipped_px_grads.append(tf.reshape(scaled, shape))
+            
 
-            # this is the dp minimization
-            #import pdb; pdb.set_trace()
-            #grads_and_vars = optimizer.compute_gradients(loss, var_list=opt_vars)
-            #op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
+            # accumulate
+            if batched_per_lot != 1:
+                accum_grads = [tf.Variable(tf.zeros_like(grad), trainable=False) for grad in clipped_px_grads]
+
+                zero_op = [grads.assign(tf.zeros_like(grads)) for grads in accum_grads]
+                accum_op = [accum_grads[i].assign_add(g) for i, g in enumerate(clipped_px_grads) if g!= None]
+                avg_op = [grads.assign(grads/batched_per_lot) for grads in accum_grads]
+            else:
+                zero_op = None
+                accum_op = None
+                avg_op = None
+                accum_grads = clipped_px_grads
+            
+            # free bugs
+            
+            clipped_px_gradients = []
+            for g_, var in zip(accum_grads, opt_vars):
+                if len(var.shape) == 1 and len(g_.shape) == 4:
+                    g_ = tf.reduce_mean(g_, axis=[1,2])
+                clipped_px_gradients.append(g_)
+            
+            # Add noise
+            ratio = px_clipping_norm/lot_size
+            def noise():
+                grads = []
+                for px_grad in clipped_px_gradients:
+                    grads.append(dp_utils.AddGaussianNoise(tf.reduce_mean(px_grad, 0), dp_sigma * ratio))
+                return grads
+            def no_noise():
+                grads = []
+                for px_grad in clipped_px_gradients:
+                    grads.append(tf.reduce_mean(px_grad, 0))
+                return grads
+            with tf.control_dependencies([privacy_accum_op]):
+                gradients = tf.cond(tf.equal(dp_sigma, tf.constant(0.0)), no_noise, noise)
+                grads_and_vars = zip(gradients, opt_vars)
+
             # global_step is incremented by one after the variables have been updated.
-            '''
-            if not isinstance(loss, list):
-                loss = [loss]
-            '''
-            op = optimizer.minimize(loss, global_step=global_step, var_list=opt_vars)
-            tf.summary.scalar("Learning_rate", learning_rate)
-            return op, learning_rate
+            op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
+
+            return op, (zero_op, accum_op, avg_op), reset_decay_op, learning_rate
     
     
     @lazy_method_no_scope
