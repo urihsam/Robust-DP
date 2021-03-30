@@ -100,7 +100,7 @@ def inception1(x, is_training=False, classes=1000,
 @var_scope('inception2')
 @set_args(__args__)
 def inception2(x, is_training=False, classes=1000,
-               stem=False, scope=None, reuse=None):
+               stem=False, use_logits=False, scope=None, reuse=None):
     x = sconv2d(x, 64, 7, stride=2, depth_multiplier=8, scope='block1')
     x = max_pool2d(x, 3, stride=2, scope='pool1')
 
@@ -130,6 +130,8 @@ def inception2(x, is_training=False, classes=1000,
     x = reduce_mean(x, [1, 2], name='avgpool')
     x = dropout(x, keep_prob=0.8, scope='dropout')
     x = fc(x, classes, scope='logits')
+    if use_logits:
+        return x
     x = softmax(x, name='probs')
     return x
 
@@ -197,7 +199,7 @@ def inception4(x, is_training=False, classes=1000,
     return x
 
 
-def inceptionresnet(x, stem_fn, A, B, C, is_training, classes, stem,
+def inceptionresnet(x, stem_fn, A, B, C, is_training, classes, stem, use_logits=False,
                     scope=None, reuse=None):
     x = stem_fn(x)
     for i in range(A['blocks']):
@@ -223,6 +225,8 @@ def inceptionresnet(x, stem_fn, A, B, C, is_training, classes, stem,
     x = reduce_mean(x, [1, 2], name='avgpool')
     x = dropout(x, keep_prob=0.8, scope='dropout')
     x = fc(x, classes, scope='logits')
+    if use_logits:
+        return x
     x = softmax(x, name='probs')
     return x
 
@@ -230,7 +234,7 @@ def inceptionresnet(x, stem_fn, A, B, C, is_training, classes, stem,
 @var_scope('inceptionresnet1')
 @set_args(__args__)
 def inceptionresnet1(x, is_training=False, classes=1000,
-                     stem=False, scope=None, reuse=None):
+                     stem=False, use_logits=False, scope=None, reuse=None):
     return inceptionresnet(
         x, stemB,
         {'blocks': 5, 'filters': [32, 32, [32, 32, 32], 256],
@@ -244,7 +248,7 @@ def inceptionresnet1(x, is_training=False, classes=1000,
 @var_scope('inceptionresnet2')
 @set_args(__args__)
 def inceptionresnet2(x, is_training=False, classes=1000,
-                     stem=False, scope=None, reuse=None):
+                     stem=False, use_logits=False, scope=None, reuse=None):
     return inceptionresnet(
         x, stemA,
         {'blocks': 10, 'filters': [32, 32, [32, 48, 64], 384],
@@ -258,7 +262,7 @@ def inceptionresnet2(x, is_training=False, classes=1000,
 @var_scope('inceptionresnet2_tfslim')
 @set_args(__args__)
 def inceptionresnetS(x, is_training=False, classes=1000,
-                     stem=False, scope=None, reuse=None):
+                     stem=False, use_logits=False, scope=None, reuse=None):
     return inceptionresnet(
         x, stemS,
         {'blocks': 10, 'filters': [32, 32, [32, 48, 64], 320],

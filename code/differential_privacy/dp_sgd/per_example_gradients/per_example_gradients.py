@@ -316,6 +316,105 @@ pxg_registry.Register("Add", AddPXG)
 
 
 ##/**PT add**/
+class Conv2DBackpropInputPXG(object):
+  """Per-example gradient rule of Conv2d op.
+
+  Same interface as MatMulPXG.
+  """
+
+  def __init__(self, op,
+               colocate_gradients_with_ops=False,
+               gate_gradients=False):
+
+    assert op.node_def.op == "Conv2DBackpropInput"
+    self.op = op
+    self.colocate_gradients_with_ops = colocate_gradients_with_ops
+    self.gate_gradients = gate_gradients
+
+  def _PxConv2DBuilder(self, input_, w, strides, padding):
+    """conv2d run separately per example, to help compute per-example gradients.
+
+    Args:
+      input_: tensor containing a minibatch of images / feature maps.
+              Shape [batch_size, rows, columns, channels]
+      w: convolution kernels. Shape
+        [kernel rows, kernel columns, input channels, output channels]
+      strides: passed through to regular conv_2d
+      padding: passed through to regular conv_2d
+
+    Returns:
+      conv: the output of the convolution.
+         single tensor, same as what regular conv_2d does
+      w_px: a list of batch_size copies of w. each copy was used
+          for the corresponding example in the minibatch.
+           calling tf.gradients on the copy gives the gradient for just
+                  that example.
+    """
+    input_shape = [int(e) for e in input_.get_shape()]
+    batch_size = input_shape[0]
+    input_px = [tf.slice(
+        input_, [example] + [0] * 3, [1] + input_shape[1:]) for example
+                in xrange(batch_size)]
+    for input_x in input_px:
+      assert int(input_x.get_shape()[0]) == 1
+    w_px = [tf.identity(w) for example in xrange(batch_size)]
+
+    shapes = input_shape
+    shapes_1 = shapes[1]*strides[1]
+    shapes_2 = shapes[2]*strides[2]
+    shapes = tf.stack([shapes[0], shapes_1, shapes_2, w.get_shape().as_list()[-2]])
+
+    conv_px = [tf.nn.conv2d_transpose(input_x, w_x,
+                            output_shape=shapes,
+                            strides=strides,
+                            padding=padding)
+               for input_x, w_x in zip(input_px, w_px)]
+    '''
+    conv_px = [tf.nn.conv2d(input_x, w_x,
+                            strides=strides,
+                            padding=padding)
+               for input_x, w_x in zip(input_px, w_px)]
+    '''
+    for conv_x in conv_px:
+      num_x = int(conv_x.get_shape()[0])
+      assert num_x == 1, num_x
+    assert len(conv_px) == batch_size
+    conv = tf.concat(axis=0, values=conv_px)
+    assert int(conv.get_shape()[0]) == batch_size
+    return conv, w_px
+
+  def __call__(self, w, z_grads):
+    idx = list(self.op.inputs).index(w)
+    # Make sure that `op` was actually applied to `w`
+    assert idx != -1
+    assert len(z_grads) == len(self.op.outputs)
+    # The following assert may be removed when we are ready to use this
+    # for general purpose code.
+    # This assert is only expected to hold in the contex of our preliminary
+    # MNIST experiments.
+    assert idx == 1  # We expect convolution weights to be arg 1
+
+    #import pdb; pdb.set_trace()
+    #images, filters = self.op.inputs
+    _, filters, images = self.op.inputs
+    strides = self.op.get_attr("strides")
+    padding = self.op.get_attr("padding")
+    # Currently assuming that one specifies at most these four arguments and
+    # that all other arguments to conv2d are set to default.
+    #import pdb; pdb.set_trace()
+    conv, w_px = self._PxConv2DBuilder(images, filters, strides, padding)
+    z_grads, = z_grads
+
+    gradients_list = tf.gradients(conv, w_px, z_grads,
+                                  colocate_gradients_with_ops=
+                                  self.colocate_gradients_with_ops,
+                                  gate_gradients=self.gate_gradients)
+
+    return tf.stack(gradients_list)
+
+pxg_registry.Register("Conv2DBackpropInput", Conv2DBackpropInputPXG)
+
+
 class AddV2PXG(object):
   """Per-example gradient rule for Add op.
 

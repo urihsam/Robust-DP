@@ -35,6 +35,8 @@ def set_flags():
     flags.DEFINE_integer("IMAGE_COLS", 32, "Input column dimension")
     flags.DEFINE_integer("NUM_CHANNELS", 3, "Input depth dimension")
     # Training params
+    flags.DEFINE_integer("NUM_SLICE_ROWS", 4, "Number of slices in row")
+    flags.DEFINE_integer("NUM_SLICE_COLS", 4, "Number of slices in col")
     flags.DEFINE_integer("BOTT_TRAIN_FREQ", 3, "Number of train bott layers freq")
     flags.DEFINE_integer("BOTT_TRAIN_FREQ_TOTAL", 5, "Number of train bott layers total")
     flags.DEFINE_integer("HIGHWAY_TRAIN_FREQ", 3, "Number of train bott layers freq")
@@ -68,6 +70,9 @@ def set_flags():
     flags.DEFINE_float("BETA_BOTT", 100.0, "Coefficient for loss")
     flags.DEFINE_float("FINETUNE_BETA", 100.0, "Coefficient for loss")
     flags.DEFINE_float("REG_SCALE", 1.0, "Coeff for regularization")
+    flags.DEFINE_float("REG_SCALE_0", 1.0, "Coeff for regularization")
+    flags.DEFINE_float("REG_SCALE_1", 1.0, "Coeff for regularization")
+    flags.DEFINE_float("REG_SCALE_2", 1.0, "Coeff for regularization")
     flags.DEFINE_float("REG_SCALE_HW", 1.0, "Coeff for regularization")
     flags.DEFINE_float("REG_SCALE_BOTT", 1.0, "Coeff for regularization")
     # Optimization params
@@ -94,10 +99,13 @@ def set_flags():
     flags.DEFINE_integer("FINETUNE_LEARNING_DECAY_STEPS", int(2.5*1e3), "Decay steps of learning rate")
     flags.DEFINE_bool("IS_GRAD_CLIPPING", False, "Use gradient clipping or not")
     flags.DEFINE_float("GRAD_CLIPPING_NORM", 10.0, "Gradient clipping norm")
+    flags.DEFINE_float("DROP_RATE", 0.5, "Drop out rate during training")
     # Robust params
     flags.DEFINE_bool("LOAD_ADVS", False, "Whether to load adv examples or not")
-    flags.DEFINE_float("ATTACK_SIZE", 1.0, "Attack size")
-    flags.DEFINE_integer("ROBUST_SAMPLING_N", 2000, "Number of sampling")
+    flags.DEFINE_float("ATTACK_NORM_BOUND", 0.2, "Bound of the attack perturbation norm")
+    flags.DEFINE_float("ROBUST_ALPHA", 0.001, "failure probability")
+    flags.DEFINE_integer("NUM_SAMPLING_0", 100, "Number of sampling")
+    flags.DEFINE_integer("NUM_SAMPLING", 100000, "Number of sampling")
     # DP params
     flags.DEFINE_integer("MAX_ITERATIONS", 500000, "Max number of perturbation")
     flags.DEFINE_integer("MAX_FINETUNE_ITERATIONS", 500000, "Max number of perturbation")
@@ -114,6 +122,8 @@ def set_flags():
     flags.DEFINE_bool("IS_MGM_LAYERWISED", False, "Whether calculate K norm layerwisedly or not")
     ## perturbation param
     flags.DEFINE_float("INPUT_SIGMA", 1.0, "The sigma of input perturbation")
+    flags.DEFINE_float("INFER_INPUT_SIGMA", 1.0, "The sigma of input perturbation")
+    flags.DEFINE_float("INFER_INPUT_SIGMA_INC_RATE", 1.5e-4, "Increase rate of the sigma of input perturbation")
     flags.DEFINE_float("INPUT_DP_SIGMA_THRESHOLD", 0.6, "The sigma threshold of input perturbation")
     flags.DEFINE_float("GRADIENT_SIGMA", 1.0, "The sigma of gradient perturbation")
     flags.DEFINE_float("TOTAL_DP_SIGMA", 1.0, "The sigma of total perturbation")

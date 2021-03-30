@@ -41,7 +41,7 @@ def jacobian(output, inputs, use_pfor=True, parallel_iterations=None):
     shape [x_1, ..., x_m], the corresponding jacobian has shape
     [y_1, ..., y_n, x_1, ..., x_m].
   """
-  import pdb; pdb.set_trace()
+  #import pdb; pdb.set_trace()
   flat_inputs = nest.flatten(inputs)
   output_tensor_shape = output.shape
   output_shape = array_ops.shape(output)

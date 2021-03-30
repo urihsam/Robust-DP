@@ -17,6 +17,7 @@ class CDEC(ABCCNN):
                  decv_channel_sizes=[3, 128, 256, 512, 512, 256, 128],  # [1, 128, 128, 128, 128]
                  decv_leaky_ratio=[0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4],
                  # bottleneck
+                 use_fc = True,
                  central_state_size=2048, 
                  # decoder fc layers
                  defc_state_sizes=[1024],
@@ -45,11 +46,13 @@ class CDEC(ABCCNN):
         self.decv_channel_sizes = decv_channel_sizes
         self.decv_leaky_ratio = decv_leaky_ratio
         # bottleneck
-        self.central_state_size = central_state_size
-        # decoder fc layers
-        self.defc_state_sizes = defc_state_sizes
-        self.defc_leaky_ratio = defc_leaky_ratio
-        self.defc_drop_rate = defc_drop_rate
+        self.use_fc = use_fc
+        if self.use_fc:
+            self.central_state_size = central_state_size
+            # decoder fc layers
+            self.defc_state_sizes = defc_state_sizes
+            self.defc_leaky_ratio = defc_leaky_ratio
+            self.defc_drop_rate = defc_drop_rate
         # img channel
         if img_channel == None:
             self.img_channel = FLAGS.NUM_CHANNELS
@@ -61,7 +64,8 @@ class CDEC(ABCCNN):
         self.decv_in_shape = [FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, self.decv_channel_sizes[0]]
         self.decv_out_dim = [FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS]
 
-        self.defc_weights, self.defc_biases, self.num_defc = self.defc_weights_biases()
+        if self.use_fc:
+            self.defc_weights, self.defc_biases, self.num_defc = self.defc_weights_biases()
         self.decv_filters, self.decv_biases, self.num_decv = self.decv_weights_biases()
 
 
@@ -69,7 +73,7 @@ class CDEC(ABCCNN):
     def decv_weights_biases(self):
         in_channel = self.decv_channel_sizes[0]
         channel_sizes = self.decv_channel_sizes[1:] + [self.img_channel]
-        return self._conv_weights_biases("W_decv", "b_decv", self.decv_filter_sizes, in_channel, channel_sizes, True)
+        return self._conv_weights_biases("W_decv", "b_decv", self.decv_filter_sizes, in_channel, channel_sizes, transpose=True)
 
 
     @lazy_method
@@ -142,7 +146,7 @@ class CDEC(ABCCNN):
 
         net = tf.identity(net, name='output')
         net = tf.reshape(net, [-1] + self.decv_in_shape)
-        #import pdb; pdb.set_trace()
+        
         return net
 
     
@@ -152,10 +156,11 @@ class CDEC(ABCCNN):
         for layer_id in range(self.num_decv):
             filter_name = "{}{}".format(W_name, layer_id)
             bias_name = "{}{}".format(b_name, layer_id)
+            #import pdb; pdb.set_trace()
             curr_filter = self.decv_filters[filter_name]
             curr_bias = self.decv_biases[bias_name]
             # de-convolution
-            net = ne.conv2d_transpose(net, out_dim=self.decv_out_dim, 
+            net = ne.conv2d_transpose(net,
                                       filters=curr_filter, biases=curr_bias,
                                       strides=self.decv_strides[layer_id], 
                                       padding=self.decv_padding[layer_id])
@@ -173,7 +178,6 @@ class CDEC(ABCCNN):
                 #net = ne.elu(net)
         net = ne.brelu(net, self.output_low_bound, self.output_up_bound) # clipping the final result 
         net = tf.identity(net, name='output')
-        net = tf.reshape(net, [-1, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, self.img_channel])
         #import pdb; pdb.set_trace()
         return net
 
@@ -181,10 +185,12 @@ class CDEC(ABCCNN):
     @lazy_method
     def evaluate(self, inputs, is_training):
         self.is_training = is_training
-        defc = self.defc_layers(inputs)
-        assert defc.get_shape().as_list()[1:] == self.decv_in_shape
-        generated = self.decv_layers(defc)
-        assert generated.get_shape().as_list()[1:] == [FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, self.img_channel]
+        if self.use_fc:
+            defc = self.defc_layers(inputs)
+            assert defc.get_shape().as_list()[1:] == self.decv_in_shape
+            generated = self.decv_layers(defc)
+        else:
+            generated = self.decv_layers(inputs)
         return generated
 
     def tf_load(self, sess, path, scope, name='deep_cdec.ckpt', spec=""):

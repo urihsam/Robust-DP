@@ -15,6 +15,7 @@ class CENC(ABCCNN):
                  conv_channel_sizes=[128, 256, 512, 512, 256, 128, 3], # [128, 128, 128, 128, 1]
                  conv_leaky_ratio=[0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4],
                  # encoder fc layers
+                 use_fc = True,
                  enfc_state_sizes=[1024], 
                  enfc_leaky_ratio=[0.2, 0.2],
                  enfc_drop_rate=[0, 0.75],
@@ -41,11 +42,13 @@ class CENC(ABCCNN):
         self.conv_channel_sizes = conv_channel_sizes
         self.conv_leaky_ratio = conv_leaky_ratio
         # encoder fc layers
-        self.enfc_state_sizes = enfc_state_sizes 
-        self.enfc_leaky_ratio = enfc_leaky_ratio
-        self.enfc_drop_rate = enfc_drop_rate
-        # bottleneck
-        self.central_state_size = central_state_size
+        self.use_fc = use_fc
+        if self.use_fc:
+            self.enfc_state_sizes = enfc_state_sizes 
+            self.enfc_leaky_ratio = enfc_leaky_ratio
+            self.enfc_drop_rate = enfc_drop_rate
+            # bottleneck
+            self.central_state_size = central_state_size
         # img channel
         if img_channel == None:
             self.img_channel = FLAGS.NUM_CHANNELS
@@ -54,10 +57,10 @@ class CENC(ABCCNN):
         # switch
         self.use_norm = use_norm
 
-        self.conv_out_shape = [FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, self.conv_channel_sizes[-1]]
-
         self.conv_filters, self.conv_biases, self.num_conv = self.conv_weights_biases()
-        self.enfc_weights, self.enfc_biases, self.num_enfc = self.enfc_weights_biases()
+        if self.use_fc:
+            self.enfc_weights, self.enfc_biases, self.num_enfc = self.enfc_weights_biases()
+        
 
 
     @lazy_method
@@ -114,7 +117,7 @@ class CENC(ABCCNN):
     
     @lazy_method
     def conv_layers(self, inputs, W_name="W_conv", b_name="b_conv"):
-        net = tf.reshape(inputs, [-1, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, self.img_channel])
+        net = inputs
         for layer_id in range(self.num_conv):
             filter_name = "{}{}".format(W_name, layer_id)
             bias_name = "{}{}".format(b_name, layer_id)
@@ -164,10 +167,12 @@ class CENC(ABCCNN):
     def evaluate(self, inputs, is_training):
         self.is_training = is_training
         conv = self.conv_layers(inputs)
-        assert conv.get_shape().as_list()[1:] == self.conv_out_shape
-        enfc = self.enfc_layers(conv)
-        assert enfc.get_shape().as_list()[1:] == [self.central_state_size]
-        return enfc
+        
+        if self.use_fc:
+            enfc = self.enfc_layers(conv)
+            assert enfc.get_shape().as_list()[1:] == [self.central_state_size]
+            return enfc
+        else: return conv
 
     def tf_load(self, sess, path, scope, name='deep_cenc.ckpt', spec=""):
         #saver = tf.train.Saver(dict(self.conv_filters, **self.conv_biases, **self.decv_filters, **self.decv_biases))
