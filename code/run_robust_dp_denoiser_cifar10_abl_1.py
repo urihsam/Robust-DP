@@ -151,6 +151,7 @@ def robust_info(sess, model, recon_outputs, graph_dict, log_file):
     is_training = graph_dict["is_training"]
 
     batch_size = FLAGS.BATCH_SIZE
+    total_batch = 100
 
     if not FLAGS.LOAD_ADVS:
         # generate adversarial examples
@@ -158,7 +159,7 @@ def robust_info(sess, model, recon_outputs, graph_dict, log_file):
         x_ = data.x_test
         y_ = data.y_test
         #total_batch = int(data.test_size/batch_size)
-        total_batch = 100
+        
 
         ys = []; xs = []; adv_fgsm = []; adv_ifgsm = []; adv_mim = []; adv_madry = []
         for idx in range(total_batch):
@@ -188,18 +189,57 @@ def robust_info(sess, model, recon_outputs, graph_dict, log_file):
         advs["mim"] = np.concatenate(adv_mim, axis=0)
         advs["madry"] = np.concatenate(adv_madry, axis=0)
         advs["ys"] = ys
-        np.save("adv_examples.npy", advs)
+        np.save("adv_examples_cifar10_atk{}.npy".format(FLAGS.ATTACK_NORM_BOUND), advs)
+        advs.pop("ys")
     else:
-        advs = np.load("adv_examples.npy", allow_pickle=True).item()
+        advs = np.load("adv_examples_cifar10_atk{}.npy".format(FLAGS.ATTACK_NORM_BOUND), allow_pickle=True).item()
         ys = advs["ys"]
+        advs.pop("ys")
 
-    is_acc = {
-        "clean": [], "fgsm": [], "ifgsm": [], "mim": [], "madry": []
-    }
-    is_robust = {
-        "clean": [], "fgsm": [], "ifgsm": [], "mim": [], "madry": []
-    }
+    # calculate acc that adv directly passes classifier and passes denoiser_classifier
+    adv_acc = {}; adv_acc_direct = {}; adv_acc_no_inp = {}
+    print("Robust defense with input std: {}, attack norm: {}".format(FLAGS.INFER_INPUT_SIGMA, FLAGS.ATTACK_NORM_BOUND))
+    with open("{}.std{}".format(log_file, FLAGS.INFER_INPUT_SIGMA), "a+") as file: 
+        file.write("Robust defense with input std: {}, attack norm: {}\n".format(FLAGS.INFER_INPUT_SIGMA, FLAGS.ATTACK_NORM_BOUND))
+    #import pdb; pdb.set_trace()
+    for key, adv in advs.items():
+        adv_acc_direct_ = 0.0
+        adv_acc_ = 0.0
+        adv_acc_no_inp_ = 0.0
+        for idx in range(total_batch):
+            adv_ = adv[idx*batch_size:(idx+1)*batch_size]
+            noise = np.random.normal(loc=0.0, scale=FLAGS.INFER_INPUT_SIGMA, size=adv_.shape)
+            feed_dict = {
+                graph_dict["data_holder"]: adv_,
+                graph_dict["noised_data_holder"]: np.clip(adv_+noise, 0.0, 1.0),
+                graph_dict["label_holder"]: ys[idx*batch_size:(idx+1)*batch_size],
+                graph_dict["beta_holder"]: FLAGS.BETA,
+                graph_dict["is_training"]: False
+            }
+            batch_adv_acc_direct_, batch_adv_acc_, batch_adv_acc_no_inp_ = sess.run([model.clean_accuracy, model.recon_accuracy, model.recon_clean_accuracy], feed_dict)
+            adv_acc_direct_ += batch_adv_acc_direct_
+            adv_acc_ += batch_adv_acc_
+            adv_acc_no_inp_ += batch_adv_acc_no_inp_
+        adv_acc_ /= total_batch
+        adv_acc_direct_ /= total_batch
+        adv_acc_no_inp_ /= total_batch
+        adv_acc[key] = adv_acc_
+        adv_acc_direct[key] = adv_acc_direct_
+        adv_acc_no_inp[key] = adv_acc_no_inp_
+
+        print("{}:".format(key))
+        print("adv direct acc: {:.4f}, adv noised acc: {:.4f}, adv non-noised acc: {:.4f}".format(
+            adv_acc_direct_, adv_acc_, adv_acc_no_inp_))
+        print()
+        print()
     
+        with open("{}.std{}".format(log_file, FLAGS.INFER_INPUT_SIGMA), "a+") as file:
+            file.write("{}:\n".format(key))
+            file.write("adv direct acc: {:.4f}, adv noised acc: {:.4f}, adv non-noised acc: {:.4f}\n".format(
+            adv_acc_direct_, adv_acc_, adv_acc_no_inp_))
+            file.write("===================================================\n")
+    
+    #import pdb; pdb.set_trace()
     robust_pred = {
         "clean": [], "fgsm": [], "ifgsm": [], "mim": [], "madry": []
     }
@@ -210,7 +250,6 @@ def robust_info(sess, model, recon_outputs, graph_dict, log_file):
     # Randomized Smoothing
     smoother = Smooth(recon_outputs[1], noised_data_holder, is_training, FLAGS.NUM_CLASSES, FLAGS.INFER_INPUT_SIGMA)
 
-    print("Robust defense with input std: {}".format(FLAGS.INFER_INPUT_SIGMA))
     for key, adv in advs.items():
         for x in adv:
             prediction, radius = smoother.certify(sess, x, FLAGS.NUM_SAMPLING_0, FLAGS.NUM_SAMPLING, FLAGS.ROBUST_ALPHA, FLAGS.BATCH_SIZE)

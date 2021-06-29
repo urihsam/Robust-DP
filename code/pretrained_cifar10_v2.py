@@ -147,7 +147,7 @@ with tf.Session(config=config, graph=g) as sess:
 
             var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
             saver = tf.train.Saver(var_list=var_list)
-            path = "../models/CIFAR10/PRE/CNN"
+            path = "../../models/CIFAR10/PRE/CNN"
             name = "model_v2.ckpt"
             if not os.path.exists(path):
                 os.mkdir(path)

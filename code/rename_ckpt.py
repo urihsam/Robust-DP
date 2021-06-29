@@ -27,7 +27,7 @@ def rename(checkpoint_dir, replace_from, replace_to, add_prefix, dry_run):
             sess.run(tf.global_variables_initializer())
             saver.save(sess, checkpoint_dir)
 
-checkpoint_dir = "../models/CIFAR10/PRE/CNN/model_v1.ckpt"
+checkpoint_dir = "../../models/CIFAR10/PRE/CNN/model_v1.ckpt"
 prefix = "cifar10cnn/"
 
 rename(checkpoint_dir, None, None, prefix, False)

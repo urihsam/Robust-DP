@@ -108,7 +108,7 @@ def conv2d(x, filters, biases, strides, padding):
         return tf.nn.conv2d(x, filters, strides=[1, strides[0], strides[1], 1], padding=padding)+ biases
 
 
-def conv2d_transpose(x, filters, biases, strides, padding):
+def conv2d_transpose(x, filters, biases, strides, padding, odd=False):
     """
     """
     shapes = [tf.shape(x)[0]] + x.get_shape().as_list()[1:]
@@ -126,6 +126,9 @@ def conv2d_transpose(x, filters, biases, strides, padding):
     '''
     shapes_1 = shapes[1]*strides[0]
     shapes_2 = shapes[2]*strides[1]
+    if odd:
+        shapes_1 -= 1
+        shapes_2 -= 1
     shapes = tf.stack([shapes[0], shapes_1, shapes_2, filters.get_shape().as_list()[-2]])
     #output_shape = [tf.shape(x)[0]] + out_dim + [filters.get_shape().as_list()[-2]]
     #output_shape[1] *= 2
