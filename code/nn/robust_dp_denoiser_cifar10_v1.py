@@ -351,6 +351,7 @@ class DP_DENOISER:
 
         return reg_term
 
+
     @lazy_method_no_scope
     def compute_M_from_input_perturbation(self, data, loss, l2norm_bound, var_list=None, scope="DP_S_MIN"):
         with tf.variable_scope(scope):
@@ -391,6 +392,53 @@ class DP_DENOISER:
             #b_left = tf.linalg.lstsq(px_pp_jac, tf.eye(px_pp_grad.get_shape().as_list()[1], batch_shape=[px_pp_grad.get_shape().as_list()[0]]))
 
             return M, px_grad_vec
+
+    
+    @lazy_method_no_scope
+    def compute_M_from_input_perturbation_v2(self, data, loss, noised_data, loss_z, l2norm_bound, var_list=None, scope="DP_S_MIN"):
+        with tf.variable_scope(scope):
+            ex = data
+            batch_size = ex.get_shape().as_list()[0]
+            px_grad = tf.gradients(loss, data)[0]
+            #px_grad = dp_utils.BatchClipByL2norm(px_grad, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+            #px_grad = tf.clip_by_norm(px_grad, FLAGS.DP_GRAD_CLIPPING_L2NORM, axes=[1, 2, 3])
+            #
+            px_grad_vec = tf.reshape(px_grad, [batch_size, 1, -1])
+            data_size = px_grad_vec.get_shape().as_list()[2]
+            #
+            noise = tf.reshape(noised_data-data, [tf.shape(data)[0], -1, 1])
+
+            remains = loss_z - loss - tf.squeeze(tf.matmul(px_grad_vec, noise), [1, 2])
+            compare = tf.math.greater_equal(remains, tf.constant(0.0))
+            #compare = remains
+            indices = tf.squeeze(tf.where(compare), 1)
+            non_neg = tf.gather(px_grad, indices, axis=0)
+            #non_neg = tf.reshape(non_neg, [tf.shape(non_neg)[0], -1])
+
+            if var_list == None:
+                var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.opt_scope_1.name)
+
+            #
+            
+            params = [tf.convert_to_tensor(x) for x in var_list]
+            px_pp_jacs = jacobian(non_neg, params, use_pfor=False)#, parallel_iterations=5000) # [b, ex_shape, sub_vec_param] * L
+
+            px_pp_jac_mat_list = [tf.reshape(px_pp_jac, [tf.shape(non_neg)[0], data_size, -1]) for px_pp_jac in px_pp_jacs]
+            '''
+            px_pp_jac_mat_list = [tf.reshape(tf.clip_by_norm(px_pp_jac, FLAGS.DP_GRAD_CLIPPING_L2NORM), 
+                [tf.shape(non_neg)[0], data_size, -1]) for px_pp_jac in px_pp_jacs]
+            '''
+            
+            px_pp_jac_mat = tf.concat(px_pp_jac_mat_list, axis=2) # [b, ex_shape, vec_param]
+            #px_pp_jac_mat = tf.clip_by_norm(px_pp_jac_mat, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+            px_pp_jac_mat = tf.transpose(px_pp_jac_mat, [0, 2, 1]) # [b, vec_param, ex_shape]
+            
+            M = tf.reduce_sum(tf.matmul(px_pp_jac_mat, tf.transpose(px_pp_jac_mat, [0, 2, 1])), axis=0)/tf.square(tf.cast(tf.shape(px_pp_jac_mat)[0], dtype=tf.float32)) #[b, vec_param, vec_param]
+            #M = tf.matmul(px_pp_jac, tf.transpose(px_pp_jac, [0, 2, 1])) #[b, vec_param, vec_param]
+
+            #b_left = tf.linalg.lstsq(px_pp_jac, tf.eye(px_pp_grad.get_shape().as_list()[1], batch_shape=[px_pp_grad.get_shape().as_list()[0]]))
+            #import pdb; pdb.set_trace()
+            return M, indices
 
         
     
@@ -569,23 +617,23 @@ class DP_DENOISER:
         print("Restore model from {}".format(path +'/'+name))
     
 
-    def tf_load(self, sess, scope=None, name='sliced_ae.ckpt'):
+    def tf_load(self, sess, scope=None, model_path="./models/CIFAR10/", name='sliced_ae.ckpt'):
         if scope == None:
             scope = "DP_DENOISER"
         #saver = tf.train.Saver(dict(self.conv_filters, **self.conv_biases, **self.decv_filters, **self.decv_biases))
         saver = tf.train.Saver(var_list=tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope))
-        path = "./models/CIFAR10/"+scope
+        path = model_path+scope
         if not os.path.exists(path):
             print("Wrong path: {}".format(path))
         saver.restore(sess, path +'/'+name)
         print("Restore model from {}".format(path +'/'+name))
 
-    def tf_save(self, sess, scope=None, name='sliced_ae.ckpt'):
+    def tf_save(self, sess, scope=None, model_path="./models/CIFAR10/", name='sliced_ae.ckpt'):
         if scope == None:
             scope = "DP_DENOISER"
         #saver = tf.train.Saver(dict(self.conv_filters, **self.conv_biases, **self.decv_filters, **self.decv_biases))
         saver = tf.train.Saver(var_list=tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope))
-        path = "./models/CIFAR10/"+scope
+        path = model_path+scope
         if not os.path.exists(path):
             os.mkdir(path)
         saver.save(sess, path +'/'+name)

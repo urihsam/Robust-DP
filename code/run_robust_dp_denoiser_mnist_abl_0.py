@@ -107,7 +107,7 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
     print("Beta: {:.4f}".format(FLAGS.BETA))
     print("Clean Acc: {:.4f}, Recon Acc: {:.4f}, Recon Clean Acc: {:.4f}".format(clean_acc, recon_acc, recon_clean_acc))
     print("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}".format(
-        dp_info["eps"], dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
+        FLAGS.TOTAL_DP_EPSILON, dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
     
     with open(log_file, "a+") as file: 
         if full_data:
@@ -118,7 +118,7 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
         file.write("Beta: {:.4f}".format(FLAGS.BETA))
         file.write("Clean Acc: {:.4f}, Recon Acc: {:.4f}, Recon Clean Acc: {:.4f}\n".format(clean_acc, recon_acc, recon_clean_acc))
         file.write("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}\n".format(
-        dp_info["eps"], dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
+        FLAGS.TOTAL_DP_EPSILON, dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
         file.write("---------------------------------------------------\n")
     
     res_dict = {"clean_acc": clean_acc,
@@ -349,7 +349,7 @@ def test():
     with tf.Session(config=config, graph=g) as sess:
         sess.run(tf.global_variables_initializer())
         # load model
-        model.tf_load(sess, name=FLAGS.CNN_CKPT_RESTORE_NAME)
+        model.tf_load(sess, model_path=FLAGS.CNN_PATH, name=FLAGS.CNN_CKPT_RESTORE_NAME)
         model.tf_load_classifier(sess, name=FLAGS.PRETRAINED_CNN_CKPT_RESTORE_NAME)
 
         
@@ -429,7 +429,11 @@ def compute_S_min_from_M(M, is_layerwised=True):
         return __compute_S_min_from_M(M)
 
 def cal_sigmas(lot_M, input_sigma, clipping_norm):
-    lot_M = sum(lot_M) / (FLAGS.BATCHES_PER_LOT**2)
+    if len(lot_M) > 1:
+        lot_M = sum(lot_M)
+    elif len(lot_M) == 1:
+        lot_M = lot_M[0]
+    lot_M = lot_M / (FLAGS.BATCHES_PER_LOT**2)
     lot_S_min = compute_S_min_from_M(lot_M, FLAGS.IS_MGM_LAYERWISED)/clipping_norm
     #import pdb; pdb.set_trace()
     min_S_min = lot_S_min
@@ -546,7 +550,7 @@ def train():
         
         
         if FLAGS.load_model:
-            model.tf_load(sess, name=FLAGS.CNN_CKPT_RESTORE_NAME)
+            model.tf_load(sess, model_path=FLAGS.CNN_PATH, name=FLAGS.CNN_CKPT_RESTORE_NAME)
         
         if FLAGS.local:
             total_train_lot = 2
@@ -736,7 +740,7 @@ def train():
                     spent_eps_delta.spent_eps,
                     spent_eps_delta.spent_delta
                     )
-            model.tf_save(sess, name=ckpt_name) # extra store
+            model.tf_save(sess, model_path=FLAGS.CNN_PATH, name=ckpt_name) # extra store
             
             if terminate:
                 break
@@ -762,7 +766,7 @@ def train():
             spent_eps_delta.spent_eps,
             spent_eps_delta.spent_delta
         )
-        model.tf_save(sess, name=ckpt_name) # extra store
+        model.tf_save(sess, model_path=FLAGS.CNN_PATH, name=ckpt_name) # extra store
 
 
 

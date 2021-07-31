@@ -119,7 +119,7 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
     print("Beta: {:.4f}".format(FLAGS.BETA))
     print("Clean Acc: {:.4f}, Recon Acc: {:.4f}, Recon Clean Acc: {:.4f}".format(clean_acc, recon_acc, recon_clean_acc))
     print("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}".format(
-        dp_info["eps"], dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
+        FLAGS.TOTAL_DP_EPSILON, dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
     
     with open(log_file, "a+") as file: 
         if full_data:
@@ -130,7 +130,7 @@ def test_info(sess, model, is_valid, graph_dict, dp_info, log_file, total_batch=
         file.write("Beta: {:.4f}".format(FLAGS.BETA))
         file.write("Clean Acc: {:.4f}, Recon Acc: {:.4f}, Recon Clean Acc: {:.4f}\n".format(clean_acc, recon_acc, recon_clean_acc))
         file.write("Total dp eps: {:.4f}, total dp delta: {:.8f}, total dp sigma: {:.4f}, input sigma: {:.4f}\n".format(
-        dp_info["eps"], dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
+        FLAGS.TOTAL_DP_EPSILON, dp_info["delta"], dp_info["total_sigma"], FLAGS.INFER_INPUT_SIGMA))
         file.write("---------------------------------------------------\n")
     
     res_dict = {"clean_acc": clean_acc,
@@ -365,7 +365,7 @@ def test():
     with tf.Session(config=config, graph=g) as sess:
         sess.run(tf.global_variables_initializer())
         # load model
-        model.tf_load(sess, name=FLAGS.CNN_CKPT_RESTORE_NAME)
+        model.tf_load(sess, model_path=FLAGS.CNN_PATH, name=FLAGS.CNN_CKPT_RESTORE_NAME)
         model.tf_load_classifier(sess, name=FLAGS.PRETRAINED_CNN_CKPT_RESTORE_NAME)
 
         
@@ -437,7 +437,11 @@ def compute_S_min_from_M(M, is_layerwised=True):
         return __compute_S_min_from_M(M)
 
 def cal_sigmas(lot_M, input_sigma, clipping_norm):
-    lot_M = sum(lot_M) / (FLAGS.BATCHES_PER_LOT**2)
+    if len(lot_M) > 1:
+        lot_M = sum(lot_M)
+    elif len(lot_M) == 1:
+        lot_M = lot_M[0]
+    lot_M = lot_M / (FLAGS.BATCHES_PER_LOT**2)
     lot_S_min = compute_S_min_from_M(lot_M, FLAGS.IS_MGM_LAYERWISED)/clipping_norm
     #import pdb; pdb.set_trace()
     min_S_min = lot_S_min
@@ -449,7 +453,6 @@ def cal_sigmas(lot_M, input_sigma, clipping_norm):
         sgd_sigma = FLAGS.TOTAL_DP_SIGMA - sigma_trans
         sigma_trans = FLAGS.TOTAL_DP_SIGMA
     return min_S_min, sgd_sigma, sigma_trans
-
 
 
 def train():
@@ -532,11 +535,13 @@ def train():
         model_lrs = [model_lr_0, model_lr_1, model_lr_2]
                 
         # analysis
-        model_M_0, _ = model.compute_M_from_input_perturbation(data_holder, model_loss_clean+model_reg_enc_bott, dp_grad_clipping_norm_holder, 
-                        var_list=enc_bott_opt_vars, scope="M_0")
+        model_M_0, model_idx_0 = model.compute_M_from_input_perturbation_v2(
+            data_holder, model_loss_clean+model_reg_enc_bott, noised_data_holder, model_loss+model_reg_enc_bott,
+            dp_grad_clipping_norm_holder, var_list=enc_bott_opt_vars, scope="M_0")
 
-        model_M_2, _ = model.compute_M_from_input_perturbation(data_holder, model_loss_clean+model_reg_dec_top, dp_grad_clipping_norm_holder, 
-                        var_list=dec_top_opt_vars, scope="M_2")
+        model_M_2, model_idx_2 = model.compute_M_from_input_perturbation_v2(
+            data_holder, model_loss_clean+model_reg_dec_top, noised_data_holder, model_loss+model_reg_dec_top, 
+            dp_grad_clipping_norm_holder, var_list=dec_top_opt_vars, scope="M_2")
 
         
 
@@ -561,7 +566,7 @@ def train():
         
         
         if FLAGS.load_model:
-            model.tf_load(sess, name=FLAGS.CNN_CKPT_RESTORE_NAME)
+            model.tf_load(sess, model_path=FLAGS.CNN_PATH, name=FLAGS.CNN_CKPT_RESTORE_NAME)
         
         if FLAGS.local:
             total_train_lot = 2
@@ -589,7 +594,8 @@ def train():
             data.shuffle_train()
             b_idx = 0
 
-            
+
+            trained_ex = 0
             for train_idx in range(total_train_lot):
             #for train_idx in range(1):
                 terminate = False
@@ -599,6 +605,7 @@ def train():
                 if input_sigma < FLAGS.INFER_INPUT_SIGMA:
                     input_sigma *= (1.0 + FLAGS.INFER_INPUT_SIGMA_INC_RATE)
                 for _ in range(FLAGS.BATCHES_PER_LOT):
+                    trained_ex += batch_size
                     #batch_xs = data.x_valid[b_idx*batch_size:(b_idx+1)*batch_size]
                     #batch_ys = data.y_valid[b_idx*batch_size:(b_idx+1)*batch_size]
                     batch_xs = data.x_train[b_idx*batch_size:(b_idx+1)*batch_size]
@@ -616,11 +623,17 @@ def train():
                     }
 
                     batch_M_0 = sess.run(fetches=model_M_0, feed_dict=feed_dict)
-                    lot_M.append(batch_M_0)
+                    if batch_M_0.shape[0] != 0:
+                        lot_M.append(batch_M_0)
                     lot_feeds.append(feed_dict)
                     b_idx += 1
-                
-                min_S_min_0, sgd_sigma_0, act_sigma_0 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+
+                if len(lot_M) != 0:
+                    min_S_min_0, sgd_sigma_0, act_sigma_0 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+                else:
+                    min_S_min_0 = 0.0
+                    sgd_sigma_0 = FLAGS.TOTAL_DP_SIGMA
+                    act_sigma_0 = FLAGS.TOTAL_DP_SIGMA
                 # for input transofrmation
                 if train_idx % 1 == 0:
                     print("enc_bott_layers:")
@@ -631,8 +644,10 @@ def train():
                     print("DP grad clipping norm 1: {}".format(FLAGS.DP_GRAD_CLIPPING_L2NORM_1))
                     print()
 
+                '''
                 if sgd_sigma_0 > 1.5:
                     threshold_count_0 += 1
+                '''
                 
                 # run op for dec_top_layers
                 sess.run(model_zero_op_0)
@@ -656,9 +671,14 @@ def train():
                 lot_M = []
                 for feed_dict in lot_feeds:
                     batch_M_2 = sess.run(fetches=model_M_2, feed_dict=feed_dict)
-                    lot_M.append(batch_M_2)
+                    if batch_M_2.shape[0] != 0:
+                        lot_M.append(batch_M_2)
 
-                min_S_min_2, sgd_sigma_2, act_sigma_2 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+                if len(lot_M) != 0:
+                    min_S_min_2, sgd_sigma_2, act_sigma_2 = cal_sigmas(lot_M, input_sigma, FLAGS.DP_GRAD_CLIPPING_L2NORM)
+                else:
+                    min_S_min_2 = 0.0
+                    sgd_sigma_2 = FLAGS.TOTAL_DP_SIGMA
                 # for input transofrmation
                 if train_idx % 1 == 0:
                     print("dec_top_layers:")
@@ -669,9 +689,10 @@ def train():
                     print("DP grad clipping norm 1: {}".format(FLAGS.DP_GRAD_CLIPPING_L2NORM_1))
                     print()
                 
+                '''
                 if sgd_sigma_2 > 1.5:
                     threshold_count_2 += 1
-
+                '''
 
                 # run op for dec_top_layers
                 sess.run(model_zero_op_2)
@@ -704,6 +725,7 @@ def train():
                     print("Epoch: {}".format(epoch))
                     print("Iteration: {}".format(itr_count))
                     #print("Learning rate: {}, Learning rate bott: {}, Learning rate highway: {}".format(lr, lr_bott, lr_highway))
+                    
                     for idx in range(len(lrs)):
                         print("Learning rate for {}: {}".format(idx, lrs[idx]))
                     print("Loss: {:.4f}".format(loss))
@@ -736,10 +758,11 @@ def train():
                     '''
                     if threshold_count_0 > 0.8*FLAGS.EVAL_TRAIN_FREQUENCY and threshold_count_2 > 0.8*FLAGS.EVAL_TRAIN_FREQUENCY:
                         FLAGS.BETA = FLAGS.BETA * 1.5
-                    '''
+                    
 
                     threshold_count_0 = 0
                     threshold_count_2 = 0
+                    '''
                 
                 if itr_count % FLAGS.EVAL_VALID_FREQUENCY == 0:
                 #if train_idx >= 0:
@@ -793,7 +816,7 @@ def train():
                     spent_eps_delta.spent_eps,
                     spent_eps_delta.spent_delta
                     )
-            model.tf_save(sess, name=ckpt_name) # extra store
+            model.tf_save(sess, model_path=FLAGS.CNN_PATH, name=ckpt_name) # extra store
             
             if terminate:
                 break
@@ -819,7 +842,7 @@ def train():
             spent_eps_delta.spent_eps,
             spent_eps_delta.spent_delta
         )
-        model.tf_save(sess, name=ckpt_name) # extra store
+        model.tf_save(sess, model_path=FLAGS.CNN_PATH, name=ckpt_name) # extra store
 
 
 
